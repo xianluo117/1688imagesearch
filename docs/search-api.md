@@ -41,6 +41,14 @@ application/json; charset=utf-8
 
 查询接口使用独立的 `SEARCH_API_KEY`。
 
+首次部署时运行：
+
+```bash
+python3 src/init_env.py
+```
+
+命令会在项目根目录生成 `.env`。查询调用方使用其中的 `SEARCH_API_KEY`；不要使用 `COOKIE_UPLOAD_API_KEY`，也不要向调用方提供 `COOKIE_ENCRYPTION_KEY`。
+
 每次请求必须携带：
 
 ```http

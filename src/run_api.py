@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import uvicorn
+from dotenv import load_dotenv
 
 
 def main() -> None:
+    project_root = Path(__file__).resolve().parent.parent
+    load_dotenv(project_root / ".env", override=False)
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

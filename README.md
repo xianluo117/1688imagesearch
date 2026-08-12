@@ -231,30 +231,38 @@ API 使用 FastAPI、SQLite 和 4 个后台 Worker：
 
 必须使用单个 Uvicorn 进程。不要配置多个 Uvicorn 或 Gunicorn Worker。
 
-### 11.2 环境变量
+### 11.2 初始化配置
 
-生成密钥：
-
-```bash
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
-```
-
-配置：
+安装依赖后执行：
 
 ```bash
-export COOKIE_UPLOAD_API_KEY='上传专用密钥，至少24字符'
-export SEARCH_API_KEY='搜索专用密钥，至少24字符且不能与上传密钥相同'
-export COOKIE_ENCRYPTION_KEY='Fernet密钥'
-export DATABASE_PATH='data/image-search.db'
-export WORKER_COUNT='4'
-export MAX_QUEUED_TASKS='100'
-export TASK_TIMEOUT_SECONDS='120'
-export TASK_RETENTION_SECONDS='86400'
-export API_HOST='127.0.0.1'
-export API_PORT='8000'
+python3 src/init_env.py
 ```
+
+该命令在项目根目录生成 `.env`，并自动创建三个安全随机值：
+
+| 变量                    | 用途                   | 使用位置                  |
+| ----------------------- | ---------------------- | ------------------------- |
+| `COOKIE_UPLOAD_API_KEY` | Cookie 上传接口密钥    | 配置到油猴脚本            |
+| `SEARCH_API_KEY`        | 搜索查询接口密钥       | 配置到调用搜索 API 的程序 |
+| `COOKIE_ENCRYPTION_KEY` | SQLite Cookie 加密密钥 | 仅由 API 服务使用         |
+
+`.env` 已加入 `.gitignore`，不会提交到 Git。配置模板见 `.env.example`。
+
+查看生成的密钥：
+
+```bash
+cat .env
+```
+
+注意：
+
+- `COOKIE_UPLOAD_API_KEY` 和 `SEARCH_API_KEY` 必须不同。
+- `COOKIE_ENCRYPTION_KEY` 不得配置到油猴或查询调用方。
+- 不要随意修改 `COOKIE_ENCRYPTION_KEY`，否则已有数据库中的 Cookie 无法解密。
+- 初始化工具默认不覆盖已有 `.env`。确认要重新生成全部密钥时使用 `python3 src/init_env.py --force`。
+
+API 启动时会自动加载项目根目录 `.env`。系统环境变量优先级高于 `.env`，生产环境也可以通过 systemd、Docker 或 Shell 注入配置。
 
 可选参数：
 
@@ -273,6 +281,7 @@ export API_PORT='8000'
 ### 11.3 启动
 
 ```bash
+python3 src/init_env.py
 PYTHONPATH=src python3 src/run_api.py
 ```
 
