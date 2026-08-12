@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Secrets
+secrets/
+*cookies*.json
+!config/cookies.example.json
+
+# Runtime outputs
+outputs/
+captures/
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+
+# Local images and captures
+input/
+/1 (1).jpeg
+/产品列表1.json
+/$null
