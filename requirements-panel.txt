@@ -1,0 +1,9 @@
+curl_cffi
+requests
+Pillow
+fastapi
+uvicorn[standard]
+aiosqlite
+cryptography
+httpx
+python-dotenv

@@ -27,6 +27,14 @@ python3 -m venv .venv
 python3 -m pip install -r requirements.txt
 ```
 
+宝塔 Python 项目的依赖安装器会逐行执行包名，可能把版本范围中的 `<` 误解析为 Shell 重定向。宝塔面板的“安装依赖包”应选择：
+
+```text
+/www/wwwroot/1688imagesearch/requirements-panel.txt
+```
+
+在服务器终端手工安装时仍使用标准 `requirements.txt`。
+
 ## 3. Cookie 导出
 
 ### 3.1 推荐格式

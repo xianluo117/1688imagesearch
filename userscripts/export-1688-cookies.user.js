@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688 Cookie 远程同步器
 // @namespace    local.1688-image-search
-// @version      2.0.0
+// @version      2.1.0
 // @description  将 1688 完整 Cookie 加密上传到远程图片搜索 API
 // @match        https://*.1688.com/*
 // @noframes
@@ -69,6 +69,24 @@
     });
   }
 
+  function mergeCookies(...cookieGroups) {
+    const merged = new Map();
+    for (const cookies of cookieGroups) {
+      for (const cookie of cookies) {
+        const normalized = normalizeCookie(cookie);
+        const domain = String(normalized.domain || "").replace(/^\./, "");
+        if (domain !== "1688.com" && !domain.endsWith(".1688.com")) continue;
+        const key = `${normalized.name}|${normalized.domain}|${normalized.path}`;
+        merged.set(key, normalized);
+      }
+    }
+    return Array.from(merged.values());
+  }
+
+  function delay(milliseconds) {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  }
+
   async function listExtensionCookies() {
     if (
       typeof GM_cookie === "undefined" ||
@@ -82,22 +100,18 @@
       { domain: ".1688.com" },
       { domain: "1688.com" },
       { url: location.href },
+      { url: `${location.origin}/` },
       { url: "https://www.1688.com/" },
       { url: "https://air.1688.com/" },
+      { url: "https://air.1688.com/kapp/1688-search/pc-image-search/" },
       { url: "https://h5api.m.1688.com/" },
     ];
-    const batches = await Promise.all(queries.map(listCookies));
-    const merged = new Map();
-    for (const batch of batches) {
-      for (const cookie of batch.cookies) {
-        const domain = String(cookie.domain || "").replace(/^\./, "");
-        if (domain !== "1688.com" && !domain.endsWith(".1688.com")) continue;
-        const key = `${cookie.name}|${cookie.domain || ""}|${cookie.path || "/"}`;
-        merged.set(key, normalizeCookie(cookie));
-      }
+    const batches = [];
+    for (const query of queries) {
+      batches.push(await listCookies(query));
     }
     return {
-      cookies: Array.from(merged.values()),
+      cookies: mergeCookies(...batches.map((batch) => batch.cookies)),
       diagnostics: batches.map((batch) => ({
         query: batch.details,
         count: batch.cookies.length,
@@ -131,29 +145,52 @@
   }
 
   async function collectCookiePayload() {
-    let cookies;
-    let mode;
-    try {
-      const result = await listExtensionCookies();
-      cookies = result.cookies;
-      mode = "GM_cookie";
-      console.table(result.diagnostics);
-    } catch (error) {
-      cookies = parseVisibleCookies();
-      mode = "document.cookie-fallback";
-      console.warn(
-        "完整 Cookie API 不可用或权限未授权，已回退到 document.cookie",
-        error,
-      );
+    let cookies = [];
+    let mode = "document.cookie";
+    let diagnostics = [];
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const visibleCookies = parseVisibleCookies();
+      try {
+        const result = await listExtensionCookies();
+        diagnostics = result.diagnostics;
+        cookies = mergeCookies(result.cookies, visibleCookies);
+        mode = "GM_cookie+document.cookie";
+      } catch (error) {
+        lastError = error;
+        cookies = mergeCookies(visibleCookies);
+        mode = "document.cookie-fallback";
+      }
+
+      const validation = validateCookies(cookies);
+      console.info("1688 Cookie 检测", {
+        attempt,
+        page: location.href,
+        mode,
+        cookieCount: cookies.length,
+        missing: validation.missing,
+      });
+      console.table(diagnostics);
+      if (!validation.missing.length) break;
+      if (attempt < 5) await delay(1000);
     }
 
     const { names, missing } = validateCookies(cookies);
     if (missing.length) {
+      const tokenMissing =
+        missing.includes("_m_h5_tk") || missing.includes("_m_h5_tk_enc");
+      const action = tokenMissing
+        ? "请先打开 https://air.1688.com/kapp/1688-search/pc-image-search/，刷新页面并等待商品列表加载完成后重试。"
+        : "请重新登录 1688，刷新页面后重试。";
       window.alert(
-        `导出结果缺少 ${missing.join(", ")}。\n` +
+        `Cookie 结果缺少 ${missing.join(", ")}。\n` +
+          `当前页面：${location.href}\n` +
           `当前模式：${mode}\n` +
-          "请打开开发者工具 Console 查看 GM_cookie 查询统计，并在 Tampermonkey 扩展详情中将网站访问权限设为“在所有网站上”。",
+          `${action}\n` +
+          "同时确认 Tampermonkey 的网站访问权限为“在所有网站上”，并查看 Console 中的 Cookie 查询统计。",
       );
+      if (lastError) console.error("GM_cookie 查询失败", lastError);
       return;
     }
 
