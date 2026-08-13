@@ -30,3 +30,19 @@ class RiskControlError(MtopError):
 
 class RateLimitError(MtopError):
     """请求触发服务端限流。"""
+
+
+class MtopNetworkError(ProtocolError):
+    """MTOP HTTP 请求因网络或服务端错误失败。"""
+
+
+class UploadNoImageIdError(ProtocolError):
+    """图片上传响应未返回 imageId。"""
+
+
+class ProductsNotFoundError(ProtocolError):
+    """图片搜索在轮询期限内没有返回商品。"""
+
+
+class TaskCancelledError(RuntimeError):
+    """后台任务收到协作式取消请求。"""

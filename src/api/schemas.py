@@ -4,16 +4,35 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+TaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
-class SearchTaskCreate(BaseModel):
+
+class UploadTaskCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image_url: HttpUrl
 
 
-class TaskCreated(BaseModel):
+class ProductTaskCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    upload_task_id: str = Field(min_length=1)
+
+
+class UploadTaskCreated(BaseModel):
     task_id: str
     status: Literal["queued"]
+
+
+class ProductTaskCreated(BaseModel):
+    task_id: str
+    upload_task_id: str
+    status: Literal["queued"]
+
+
+class UploadResultPayload(BaseModel):
+    image_id: str
+    search_page_url: str
 
 
 class ProductResult(BaseModel):
@@ -24,21 +43,33 @@ class ProductResult(BaseModel):
     product_url: str | None
 
 
-class SearchResultPayload(BaseModel):
+class ProductSearchResultPayload(BaseModel):
     search_page_url: str
     image_id: str
     found: int | None
     products: list[ProductResult] = Field(max_length=3)
 
 
-class TaskStatusResponse(BaseModel):
+class UploadTaskStatusResponse(BaseModel):
     task_id: str
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: TaskStatus
     created_at: float
     updated_at: float
     started_at: float | None = None
     finished_at: float | None = None
-    result: SearchResultPayload | None = None
+    result: UploadResultPayload | None = None
+    error: dict[str, str] | None = None
+
+
+class ProductTaskStatusResponse(BaseModel):
+    task_id: str
+    upload_task_id: str
+    status: TaskStatus
+    created_at: float
+    updated_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    result: ProductSearchResultPayload | None = None
     error: dict[str, str] | None = None
 
 
@@ -59,6 +90,8 @@ class HealthResponse(BaseModel):
 
 class DetailedHealthResponse(BaseModel):
     status: Literal["ok"]
-    worker_limit: int
     cookie: dict[str, Any]
-    tasks: dict[str, int]
+    upload_workers: int
+    product_workers: int
+    upload_tasks: dict[str, int]
+    product_tasks: dict[str, int]

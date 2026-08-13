@@ -229,13 +229,14 @@ md5(token + "&" + timestamp_ms + "&" + appKey + "&" + data_json)
 
 ### 11.1 架构
 
-API 使用 FastAPI、SQLite 和 4 个后台 Worker：
+API 使用 FastAPI、SQLite、2 个上传 Worker 和 2 个商品 Worker：
 
 - Cookie 加密保存在 SQLite。
-- 搜索任务持久化为 `queued`、`running`、`succeeded` 或 `failed`。
-- 同时最多执行 4 个任务，超出的请求排队。
+- 上传任务和商品任务独立持久化，状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。
+- 上传成功后立即保存 `image_id` 和官方搜索页 URL，不自动创建商品任务。
+- 商品任务显式引用成功的上传任务，并使用上传时绑定的 Cookie 版本。
 - 每个任务创建独立的 Chrome 指纹会话。
-- 服务重启后，未完成的 `running` 任务恢复为 `queued`。
+- 服务重启后，未取消的 `running` 任务恢复为 `queued`，已请求取消的任务恢复为 `cancelled`。
 
 必须使用单个 Uvicorn 进程。不要配置多个 Uvicorn 或 Gunicorn Worker。
 
@@ -274,17 +275,21 @@ API 启动时会自动加载项目根目录 `.env`。系统环境变量优先级
 
 可选参数：
 
-| 变量                       |    默认值 | 说明                        |
-| -------------------------- | --------: | --------------------------- |
-| `WORKER_COUNT`             |       `4` | 后台 Worker 数，范围 1 到 4 |
-| `MAX_QUEUED_TASKS`         |     `100` | 排队和执行中的任务总上限    |
-| `TASK_TIMEOUT_SECONDS`     |     `120` | 单任务总超时                |
-| `TASK_RETENTION_SECONDS`   |   `86400` | 已完成任务保留秒数          |
-| `DOWNLOAD_CONNECT_TIMEOUT` |      `10` | 图片连接超时                |
-| `DOWNLOAD_TIMEOUT`         |      `30` | 图片下载总超时              |
-| `MAX_IMAGE_BYTES`          | `8388608` | 远程图片最大字节数          |
-| `SEARCH_READY_RETRIES`     |       `8` | 首屏就绪重试次数            |
-| `SEARCH_READY_INTERVAL`    |     `1.5` | 首屏重试间隔秒数            |
+| 变量                           |    默认值 | 说明                        |
+| ------------------------------ | --------: | --------------------------- |
+| `UPLOAD_WORKER_COUNT`          |       `2` | 上传 Worker 数，范围 1 到 2 |
+| `PRODUCT_WORKER_COUNT`         |       `2` | 商品 Worker 数，范围 1 到 2 |
+| `MAX_QUEUED_TASKS`             |     `100` | 每类排队和执行任务总上限    |
+| `UPLOAD_TASK_TIMEOUT_SECONDS`  |     `240` | 上传任务总超时              |
+| `PRODUCT_TASK_TIMEOUT_SECONDS` |     `180` | 商品任务总超时              |
+| `TASK_RETENTION_SECONDS`       |   `86400` | 终态任务保留秒数            |
+| `DOWNLOAD_CONNECT_TIMEOUT`     |      `10` | 图片连接超时                |
+| `DOWNLOAD_TIMEOUT`             |      `30` | 图片下载总超时              |
+| `MAX_IMAGE_BYTES`              | `8388608` | 远程图片最大字节数          |
+| `SEARCH_HTTP_TIMEOUT`          |      `90` | 单次 MTOP HTTP 请求超时     |
+| `SEARCH_NETWORK_RETRIES`       |       `1` | MTOP 网络重试次数           |
+| `SEARCH_READY_RETRIES`         |       `8` | 商品首屏就绪重试次数        |
+| `SEARCH_READY_INTERVAL`        |     `1.5` | 商品首屏重试间隔秒数        |
 
 ### 11.3 启动
 
@@ -353,58 +358,41 @@ curl -X POST https://search.example.com/api/v1/cookies \
 }
 ```
 
-### 11.6 创建搜索任务
+### 11.6 两阶段任务
+
+创建上传任务：
 
 ```bash
-curl -X POST https://search.example.com/api/v1/search-tasks \
+curl -X POST https://search.example.com/api/v1/upload-tasks \
   -H "X-API-Key: $SEARCH_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"image_url":"https://example.com/product.jpg"}'
 ```
 
-响应：
-
-```json
-{
-  "task_id": "1d6f595d-34cb-4c49-a022-dfb97e1c7924",
-  "status": "queued"
-}
-```
-
-### 11.7 查询任务
+轮询上传任务：
 
 ```bash
 curl -H "X-API-Key: $SEARCH_API_KEY" \
-  https://search.example.com/api/v1/search-tasks/1d6f595d-34cb-4c49-a022-dfb97e1c7924
+  https://search.example.com/api/v1/upload-tasks/upload-task-id
 ```
 
-成功响应中的 `products` 最多 3 条：
+上传成功后显式创建商品任务：
 
-```json
-{
-  "task_id": "1d6f595d-34cb-4c49-a022-dfb97e1c7924",
-  "status": "succeeded",
-  "created_at": 1786490000.0,
-  "updated_at": 1786490004.0,
-  "started_at": 1786490000.2,
-  "finished_at": 1786490004.0,
-  "result": {
-    "search_page_url": "https://air.1688.com/kapp/1688-search/pc-image-search/?tab=imageSearch&imageId=123&imageIdList=123&spm=...",
-    "image_id": "123",
-    "found": 697,
-    "products": [
-      {
-        "image": "https://cbu01.alicdn.com/image.jpg",
-        "title": "商品标题",
-        "price": "128.00",
-        "sale_quantity": "311",
-        "product_url": "https://detail.1688.com/offer/123.html"
-      }
-    ]
-  },
-  "error": null
-}
+```bash
+curl -X POST https://search.example.com/api/v1/product-tasks \
+  -H "X-API-Key: $SEARCH_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"upload_task_id":"upload-task-id"}'
 ```
+
+轮询商品任务：
+
+```bash
+curl -H "X-API-Key: $SEARCH_API_KEY" \
+  https://search.example.com/api/v1/product-tasks/product-task-id
+```
+
+取消任务使用 `DELETE` 请求对应任务 URL。完整字段、错误码和轮询示例见 [`docs/search-api.md`](docs/search-api.md)。
 
 ### 11.8 安全限制
 

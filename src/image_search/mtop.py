@@ -13,6 +13,7 @@ from curl_cffi import requests as curl_requests
 from .errors import (
     AuthenticationError,
     MtopError,
+    MtopNetworkError,
     ProtocolError,
     RateLimitError,
     RiskControlError,
@@ -210,8 +211,25 @@ class MtopClient:
 
         while True:
             token_before = self._token_cookie()
+            attempt_number = network_attempt + 1
+            started_at = time.monotonic()
+            LOGGER.info(
+                "MTOP 请求开始: api=%s method=%s attempt=%d/%d payload_bytes=%d",
+                request.api,
+                request.method.upper(),
+                attempt_number,
+                self.network_retries + 1,
+                len(data_text.encode("utf-8")),
+            )
             try:
                 payload = self._request_once(request, data_text)
+                LOGGER.info(
+                    "MTOP 请求成功: api=%s method=%s attempt=%d elapsed=%.2fs",
+                    request.api,
+                    request.method.upper(),
+                    attempt_number,
+                    time.monotonic() - started_at,
+                )
                 ensure_mtop_success(payload)
                 if self.response_hook:
                     self.response_hook(request, payload)
@@ -224,14 +242,35 @@ class MtopClient:
                     continue
                 raise
             except (requests.RequestException, curl_requests.RequestsError) as exc:
+                elapsed = time.monotonic() - started_at
                 response = getattr(exc, "response", None)
                 status = getattr(response, "status_code", None)
                 status = status if isinstance(status, int) and status > 0 else None
                 retryable = status is None or status >= 500
+                LOGGER.warning(
+                    "MTOP 请求异常: api=%s method=%s attempt=%d/%d elapsed=%.2fs status=%s error_type=%s error=%s",
+                    request.api,
+                    request.method.upper(),
+                    attempt_number,
+                    self.network_retries + 1,
+                    elapsed,
+                    status if status is not None else "network",
+                    type(exc).__name__,
+                    str(exc),
+                )
                 if not retryable or network_attempt >= self.network_retries:
                     kind = f"HTTP {status}" if status is not None else "网络"
-                    raise ProtocolError(f"MTOP {kind}请求失败: {exc}") from exc
+                    raise MtopNetworkError(
+                        f"MTOP {kind}请求失败: api={request.api}, method={request.method.upper()}, "
+                        f"attempts={attempt_number}, elapsed={elapsed:.2f}s, error={exc}"
+                    ) from exc
                 delay = min(8.0, 0.8 * (2**network_attempt))
                 network_attempt += 1
-                LOGGER.warning("MTOP 网络或服务端异常，%.1f 秒后进行第 %d 次重试", delay, network_attempt)
+                LOGGER.warning(
+                    "MTOP 将重试: api=%s delay=%.1fs next_attempt=%d/%d",
+                    request.api,
+                    delay,
+                    network_attempt + 1,
+                    self.network_retries + 1,
+                )
                 time.sleep(delay)

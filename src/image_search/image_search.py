@@ -5,12 +5,12 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from curl_cffi import requests as curl_requests
 
 from .cookies import ImportedCookie, load_cookie_records_into_session, load_cookies
-from .errors import ProtocolError
+from .errors import ProductsNotFoundError, ProtocolError, TaskCancelledError, UploadNoImageIdError
 from .image_input import DEFAULT_MAX_IMAGE_BYTES, encode_image_base64, read_image_base64
 from .mtop import MtopClient, MtopRequest, compact_json
 from .parser import ParsedPage, Product, parse_page
@@ -163,7 +163,7 @@ class ImageSearchClient:
         nested = nested if isinstance(nested, dict) else {}
         image_id = nested.get("imageId") or business.get("imageId")
         if not image_id:
-            raise ProtocolError("上传成功响应中缺少 imageId")
+            raise UploadNoImageIdError("上传成功响应中缺少 imageId")
         return UploadContext(
             image_id=str(image_id),
             session_id=_optional_text(business.get("sessionId")),
@@ -208,25 +208,33 @@ class ImageSearchClient:
         payload = self._call_recommend(self._search_params(image_id, page), search_request=True)
         return parse_page(payload, include_raw=self.options.include_raw_item)
 
-    def _search_uploaded(self, upload: UploadContext) -> SearchResult:
+    def search_uploaded(
+        self,
+        upload: UploadContext,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> SearchResult:
         page: ParsedPage | None = None
         pages_requested = 0
 
         for attempt in range(self.options.ready_retries + 1):
+            if cancel_check and cancel_check():
+                raise TaskCancelledError("商品任务已取消")
             if attempt > 0 and self.options.request_interval:
                 time.sleep(self.options.request_interval)
+            if cancel_check and cancel_check():
+                raise TaskCancelledError("商品任务已取消")
             LOGGER.info("请求图搜首屏，尝试 %d/%d", attempt + 1, self.options.ready_retries + 1)
-            try:
-                candidate = self.search_page(upload.image_id, 1)
-            except ProtocolError:
-                candidate = None
+            candidate = self.search_page(upload.image_id, 1)
             pages_requested += 1
+            if cancel_check and cancel_check():
+                raise TaskCancelledError("商品任务已取消")
             if candidate is not None and candidate.products:
                 page = candidate
                 break
 
         if page is None:
-            raise ProtocolError("图片上传成功，但首屏结果在等待时间内尚未就绪")
+            raise ProductsNotFoundError("图片搜索未返回商品")
 
         products: list[Product] = []
         seen: set[str] = set()
@@ -248,11 +256,30 @@ class ImageSearchClient:
             stop_reason="result_limit",
         )
 
+    def search_image_id(
+        self,
+        image_id: str,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> SearchResult:
+        if not image_id.strip():
+            raise ProtocolError("image_id 不能为空")
+        return self.search_uploaded(
+            UploadContext(
+                image_id=image_id,
+                session_id=None,
+                request_id=None,
+                pvid=None,
+                trace_id=None,
+            ),
+            cancel_check=cancel_check,
+        )
+
     def search(self, image_path: str | Path) -> SearchResult:
-        return self._search_uploaded(self.upload_image(image_path))
+        return self.search_uploaded(self.upload_image(image_path))
 
     def search_bytes(self, content: bytes) -> SearchResult:
-        return self._search_uploaded(self.upload_image_bytes(content))
+        return self.search_uploaded(self.upload_image_bytes(content))
 
 
 def _optional_text(value: Any) -> str | None:
