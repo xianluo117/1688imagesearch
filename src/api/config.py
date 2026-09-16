@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,8 +71,17 @@ class Settings:
     search_network_retries: int = 1
     search_ready_retries: int = 8
     search_ready_interval: float = 1.5
+    sku_max_concurrency: int = 2
+    sku_http_timeout: float = 20.0
+    sku_query_timeout_seconds: float = 90.0
 
     def __post_init__(self) -> None:
+        if type(self.sku_max_concurrency) is not int or not 1 <= self.sku_max_concurrency <= 8:
+            raise ConfigurationError("sku_max_concurrency 必须在 1 到 8 之间")
+        if not math.isfinite(self.sku_http_timeout) or not 0 < self.sku_http_timeout <= 120:
+            raise ConfigurationError("sku_http_timeout 必须大于 0 且不超过 120 秒")
+        if not math.isfinite(self.sku_query_timeout_seconds) or self.sku_query_timeout_seconds <= 0:
+            raise ConfigurationError("sku_query_timeout_seconds 必须为有限正数")
         if not 1 <= self.upload_worker_count <= 2:
             raise ConfigurationError("upload_worker_count 必须在 1 到 2 之间")
         if not 1 <= self.product_worker_count <= 2:
@@ -109,4 +119,7 @@ class Settings:
             search_network_retries=_non_negative_int("SEARCH_NETWORK_RETRIES", 1),
             search_ready_retries=_non_negative_int("SEARCH_READY_RETRIES", 8),
             search_ready_interval=_positive_float("SEARCH_READY_INTERVAL", 1.5),
+            sku_max_concurrency=_positive_int("SKU_MAX_CONCURRENCY", 2),
+            sku_http_timeout=_positive_float("SKU_HTTP_TIMEOUT", 20.0),
+            sku_query_timeout_seconds=_positive_float("SKU_QUERY_TIMEOUT_SECONDS", 90.0),
         )

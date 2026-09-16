@@ -2,10 +2,10 @@
 
 ## 1. 范围
 
-输入标准1688详情链接及已有Cookie文件，请求详情HTML，输出商品ID、SKU ID、规格位置和值、规格名、商品主图及状态。
+输入标准1688详情链接，请求详情HTML，输出商品ID、SKU ID、规格位置和值、规格名、商品主图及状态。可使用命令行，或第7节新增的独立HTTP接口。
 
-- 不修改图搜、API和数据库，不调用MTOP，不启用浏览器兜底。
-- 不自动寻找Cookie文件；只读取明确传入的路径。
+- HTTP接口复用服务器已有Cookie和查询鉴权，不修改图搜流程，不创建图搜任务或新数据库表，不调用MTOP，不启用浏览器兜底。
+- 命令行只读取明确传入的Cookie路径；HTTP接口读取服务器当前激活版本，不需要调用方再次上传Cookie。
 - 没有真实Cookie，不代表已成功在线采集。目标商品772946834568仍待实测。
 - 规格名目前始终为空并告警：尚无已验证真实规格定义路径，不推断颜色、尺码。
 - 主图仅接受唯一且绑定当前商品地址的Open Graph元数据。此规则只经过合成样例测试，未确认目标页面提供这些元数据。
@@ -87,4 +87,90 @@ Cookie格式沿用[现有加载器](../src/image_search/cookies.py)：导出的�
 
 离线测试运行方式：python -m unittest discover -s tests -p [test_product_sku.py](../tests/test_product_sku.py) -v。此处链接显示的是测试匹配文件名，不把链接URL传给命令。
 
-本次验证环境：Windows、Python 3.13、curl_cffi 0.16.3、requests 2.34.2、Pillow 11.3.0。Pillow为现有图搜包初始化的间接依赖；未修改该初始化代码。请求控制测试使用模拟会话，Cookie兼容性测试仅创建真实会话而不请求网络。未运行全量API/数据库测试，未开展在线采集。
+首期模块验证环境：Windows、Python 3.13、curl_cffi 0.16.3、requests 2.34.2、Pillow 11.3.0。Pillow为现有图搜包初始化的间接依赖；未修改该初始化代码。请求控制测试使用模拟会话，Cookie兼容性测试仅创建真实会话而不请求网络。HTTP接口补充验证记录见第9节；未开展在线采集。
+
+## 7. HTTP API调用
+
+### 7.1 地址和鉴权
+
+- 网站：https://1688imagesearch.xiaoc-ai.com
+- 请求：POST https://1688imagesearch.xiaoc-ai.com/api/v1/product-skus
+- 请求头：Content-Type 为 application/json；X-API-Key 为现有搜索密钥，对应服务器 SEARCH_API_KEY，不能使用Cookie上传密钥。
+- 只需提交字符串字段 [`product_url`](../src/api/sku_schemas.py:12)，不接受额外字段，不接收Cookie或图搜任务ID。
+- 每次查询读取服务器已激活Cookie版本，使用独立会话；不修改服务器Cookie记录，不把Cookie放进响应。已有Cookie可用时无需重新上传。
+
+### 7.2 目标898728774563调用示例
+
+在本地PowerShell中运行。先由用户在本地安全配置 SEARCH_API_KEY 环境变量；以下示例不包含真实密钥，不会读取服务器私密文件。请求契约见 [`ProductSkuRequest`](../src/api/sku_schemas.py:9)，鉴权见 [`_authorize()`](../src/api/sku.py:13)。
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [Console]::OutputEncoding
+$body = @{ product_url = 'https://detail.1688.com/offer/898728774563.html' } | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post `
+  -Uri 'https://1688imagesearch.xiaoc-ai.com/api/v1/product-skus' `
+  -Headers @{ 'X-API-Key' = $env:SEARCH_API_KEY } `
+  -ContentType 'application/json' -Body $body -TimeoutSec 110 |
+  ConvertTo-Json -Depth 12
+```
+
+这是调用示例，不是该商品在线成功记录。非2xx响应需由调用方读取HTTP错误响应体，不能只显示通用网络错误。
+
+### 7.3 响应和错误
+
+有分类结果时直接返回 [`ProductSkuResponse`](../src/api/sku_schemas.py:15)，不包任务对象、不返回轮询ID。包含商品ID、规范链接、来源、状态、原因、主图、SKU数组、SKU数量、警告和完整性；结构沿用[独立结果模型](../src/product_sku/models.py:21)。HTTP状态映射见[路由](../src/api/sku.py:63)。
+
+| HTTP | 场景 | 响应处理 |
+|---|---|---|
+| 200 | success、partial_success | 读取SKU及警告；当前真实解析器只产生部分成功，不保证全部SKU |
+| 200 | source_not_applicable | 当前来源缺少字段或字段为空；这是有分类的查询结果，不表示已获取SKU |
+| 401 | 查询密钥缺失或错误 | detail中返回固定错误码 INVALID_API_KEY |
+| 422 | 非法链接、缺少字段、类型错误、额外字段 | 修正请求；不发起详情请求 |
+| 429 | 并发已满 | detail错误码 SKU_BUSY；稍后重试，不进入等待队列 |
+| 502 | access_restricted、parse_failed、network_failed | 保留完整分类结果、原因及警告；风控不自动重试 |
+| 502 | 未预期异常或结果结构异常 | detail错误码 SKU_QUERY_FAILED；不回显异常原文 |
+| 503 | 无激活Cookie、密文损坏、无适用Cookie | detail错误码 COOKIE_UNAVAILABLE；由管理员检查已有会话 |
+| 503 | login_required | 保留分类结果；服务器会话被上游要求登录，不是查询密钥错误 |
+| 503 | 服务关闭中 | detail错误码 SKU_SERVICE_STOPPING |
+| 504 | 请求等待超时 | detail错误码 SKU_QUERY_TIMEOUT；后台线程结束前仍占槽 |
+
+即使HTTP为200，也必须检查 [`status`](../src/api/sku_schemas.py:18)、[`sku_count`](../src/api/sku_schemas.py:28)和[`warnings`](../src/api/sku_schemas.py:26)。规格名当前为空；主图只来自与商品绑定的标准元数据，不代表已验证真实商品主图路径。
+
+## 8. 配置和部署
+
+### 8.1 独立并发及超时
+
+配置在[服务器设置](../src/api/config.py)中读取；不配置时使用默认值。
+
+| 环境变量 | 默认值 | 规则 |
+|---|---|---|
+| SKU_MAX_CONCURRENCY | 2 | 每进程1至8个查询；与图搜工作线程独立 |
+| SKU_HTTP_TIMEOUT | 20 | 每次上游请求超时秒数，大于0且不超过120 |
+| SKU_QUERY_TIMEOUT_SECONDS | 90 | HTTP查询等待秒数，有限正数 |
+
+- 固定最多一次网络重试，最多两次受限重定向，因此总耗时可能超过单次请求超时。
+- 使用专用线程池执行同步网络操作；准入包含Cookie加载阶段，满额立即拒绝，不建立无界队列。
+- 客户端断开或HTTP等待超时不能杀死同步线程。操作继续占槽，直到真实结束并关闭会话。不能以取消请求绕过并发限制。
+- 正常停机先停止准入，等待已接收操作完成后关闭线程池。反向代理读取超时建议高于查询等待超时，例如默认配置下110秒。
+- 限制按进程计算；[现有启动入口](../src/run_api.py:23)使用单进程。自行增加进程数会倍增总并发。
+
+### 8.2 同步后必须重启
+
+1. 将实现、测试及文档通过正常发布流程同步到服务器，确保依赖满足[项目依赖清单](../requirements.txt)。
+2. 保留现有数据库路径、Cookie加密密钥及搜索密钥；无需新建表或再次上传已有可用Cookie。
+3. **git同步代码后必须重启实际API服务进程，路由才会注册。只同步文件不会让运行中的服务自动增加接口。** 使用现有进程管理器重启原服务；手动启动时先停止原进程，再通过Python运行[启动入口](../src/run_api.py)。不要另起重复占用端口的进程。
+4. 确认反向代理允许新路径POST，读取超时符合上述配置。重启后在站点 /docs 或 /openapi.json 确认出现 /api/v1/product-skus。
+5. 由用户使用第7节本地密钥示例发起实际查询，并区分SKU数据、风控、登录和数据源不适用结果。
+
+本轮没有执行git提交、推送、服务器部署或重启，也没有请求上述线上网站或1688商品。
+
+## 9. HTTP接口离线验证
+
+- [x] 新增[独立路由](../src/api/sku.py)、[响应契约](../src/api/sku_schemas.py)和[有界查询服务](../src/api/sku_service.py)。
+- [x] 11项[接口测试](../tests/test_sku_api.py)通过，覆盖鉴权、无效输入、Cookie缺失/损坏、分类结果、脱敏、取消、超时和停机等待。
+- [x] 真实SKU客户端与模拟HTTP会话的集成测试通过，覆盖Cookie传入、HTML解析、响应与自有会话关闭。
+- [x] 最终完整56项离线回归通过：原API/数据库11项、图搜协议7项、SKU模块27项、SKU接口11项；运行耗时2.814秒。补丁空白检查通过。
+- [ ] 发布并重启后验证线上路由和反向代理。
+- [ ] 在线请求目标898728774563，人工核对规格组合、主图和覆盖范围。
+
+初次运行因缺少httpx在导入阶段失败；随后按现有依赖清单安装依赖并通过上述回归。验证环境：Windows11、Python3.13、FastAPI0.141.1、Pydantic2.13.5、httpx0.28.1、curl_cffi0.16.3。测试使用临时数据库及合成Cookie，不读取私密配置；原API回归禁止图搜工作线程启动，不发出在线图搜请求。离线通过不表示线上可采集成功。

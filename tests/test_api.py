@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 import httpx
@@ -169,6 +170,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             max_queued_tasks=10,
         )
         self.app = create_app(self.settings)
+        # Route regression tests must not dispatch real image-search requests.
+        for workers in (self.app.state.upload_workers, self.app.state.product_workers):
+            stub = patch.object(workers, "start", AsyncMock())
+            stub.start()
+            self.addCleanup(stub.stop)
         self.lifespan = self.app.router.lifespan_context(self.app)
         await self.lifespan.__aenter__()
         self.client = httpx.AsyncClient(
