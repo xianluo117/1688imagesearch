@@ -17,6 +17,15 @@ class Sku:
     specifications: list[Specification]
 
 
+@dataclass(frozen=True)
+class SpecificationImage:
+    position: int
+    field: str
+    name: str | None
+    value: str | None
+    image_url: str | None = None
+
+
 @dataclass
 class SkuResult:
     product_id: str
@@ -30,6 +39,7 @@ class SkuResult:
     completeness: str = "unknown"
     seller_user_id: str | None = None
     seller_member_id: str | None = None
+    specification_images: list[SpecificationImage] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

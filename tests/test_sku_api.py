@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet
 from api.app import create_app
 from api.config import ConfigurationError, Settings
 from api.cookie_store import CookieStoreError
-from product_sku.models import Sku, SkuResult, Specification
+from product_sku.models import Sku, SkuResult, Specification, SpecificationImage
 from product_sku.client import ProductSkuClient
 
 URL = "https://detail.1688.com/offer/898728774563.html"
@@ -168,6 +168,24 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             session.close.assert_called_once()
             upstream.close.assert_called_once()
             self.assertEqual(session.get.call_args.kwargs["timeout"], 20)
+
+    async def test_specification_images_contract(self):
+        await self.save_cookie()
+        payload = result()
+        payload.specification_images = [
+            SpecificationImage(1, "sku1", "颜色", "蓝色", "https://img.example/blue.jpg"),
+            SpecificationImage(2, "sku2", "尺码", "M", None),
+        ]
+        self.fake.fetch.return_value = payload
+        response = await self.post()
+        self.assertEqual(response.status_code, 200)
+        images = response.json()["specification_images"]
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0]["image_url"], "https://img.example/blue.jpg")
+        self.assertIsNone(images[1]["image_url"])
+        self.assertNotIn("image_url", response.json()["skus"][0])
+        self.fake.fetch.return_value = result()
+        self.assertEqual((await self.post()).json()["specification_images"], [])
 
     async def test_seller_ids_preserved_and_missing_are_null(self):
         await self.save_cookie()

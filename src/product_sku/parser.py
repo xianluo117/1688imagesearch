@@ -6,6 +6,7 @@ from .extraction import (MAX_BYTES, MAX_CANDIDATES, MAX_DEPTH, MAX_NODES,
                          DecodeLimit, Page, decode_string, json_roots)
 from .models import Sku, SkuResult, Specification
 from .urls import normalize_url
+from .specification_images import OptionImages
 
 FIELD = "pieceWeightScaleInfo"
 IDENTITY_KEYS = ("offerId", "productId", "itemId")
@@ -208,7 +209,7 @@ def _rows(arrays: list[Any]) -> tuple[list[Sku], list[str], bool]:
     return list(found.values()), sorted(warnings), malformed
 
 
-def _trade_skus(models: list[Any], product_id: str) -> tuple[list[Sku], list[str]]:
+def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None = None) -> tuple[list[Sku], list[str]]:
     found: dict[str, Sku] = {}
     conflicts: set[str] = set()
     warnings: set[str] = set()
@@ -256,6 +257,8 @@ def _trade_skus(models: list[Any], product_id: str) -> tuple[list[Sku], list[str
             sku_id = identifier(row["skuId"])
             sku = Sku(sku_id, [Specification(i, f"sku{i}", part, name)
                                for i, (part, name) in enumerate(zip(parts, names), 1)])
+            if images is not None:
+                images.add(sku, props)
             if sku_id in conflicts:
                 continue
             if sku_id in found and found[sku_id] != sku:
@@ -283,9 +286,11 @@ def parse_detail(text: str, url: str) -> SkuResult:
         models: list[Any] = []
         sellers: list[dict] = []
         arrays, unscoped = _arrays(roots, product_id, models, sellers)
-        trade_skus, trade_warnings = _trade_skus(models, product_id)
+        images = OptionImages()
+        trade_skus, trade_warnings = _trade_skus(models, product_id, images)
         if trade_skus:
             result.skus = trade_skus
+            result.specification_images = images.finish(trade_skus)
             result.warnings = trade_warnings + ["sku_completeness_unknown"]
             if malformed_json:
                 result.warnings.append("malformed_other_candidate")
@@ -322,8 +327,10 @@ def parse_detail(text: str, url: str) -> SkuResult:
         result.warnings.extend(["specification_names_unverified", "sku_completeness_unknown"])
         result.status, result.reason = "partial_success", "sku_data_found"
         _set_seller(result, sellers)
+        result.specification_images = OptionImages().finish(result.skus)
     except (DecodeLimit, RecursionError, ValueError) as exc:
         result.skus = []
+        result.specification_images = []
         result.status = "parse_failed"
         result.reason = str(exc) if isinstance(exc, DecodeLimit) else "invalid_structure"
     return result

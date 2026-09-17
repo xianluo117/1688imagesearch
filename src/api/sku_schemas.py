@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from product_sku.models import Sku
+from product_sku.models import Sku, SpecificationImage
 
 
 class ProductSkuRequest(BaseModel):
@@ -28,3 +28,4 @@ class ProductSkuResponse(BaseModel):
     sku_count: int
     seller_user_id: str | None = None
     seller_member_id: str | None = None
+    specification_images: list[SpecificationImage] = Field(default_factory=list)

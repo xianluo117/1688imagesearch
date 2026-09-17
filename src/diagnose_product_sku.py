@@ -68,6 +68,23 @@ def inspect_page(text, url):
                             allowed = [k for k in item if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,63}", k)]
                             emit("item_schema", location=label, fields=[k for k in allowed if k in item],
                                  field_count=len(item))
+            if isinstance(props, list):
+                from urllib.parse import urlsplit
+                for position, prop in enumerate(props, 1):
+                    options = prop.get("value", []) if isinstance(prop, dict) else []
+                    counts = {"options": len(options), "present": 0, "https": 0, "http": 0, "relative": 0, "other": 0}
+                    for option in options:
+                        image_url = option.get("imageUrl") if isinstance(option, dict) else None
+                        if not image_url:
+                            continue
+                        counts["present"] += 1
+                        try:
+                            scheme = urlsplit(image_url).scheme if isinstance(image_url, str) else "other"
+                            category = scheme if scheme in ("https", "http") else "relative" if isinstance(image_url, str) and image_url.startswith("//") else "other"
+                        except ValueError:
+                            category = "other"
+                        counts[category] += 1
+                    emit("spec_image_urls", position=position, **counts)
             sku_map = _path(model, "tradeModel", "skuMap")
             emit("trade_schema", candidate_type=type(sku_map).__name__, count=len(sku_map) if isinstance(sku_map, (dict, list)) else None)
             if isinstance(sku_map, (dict, list)):
@@ -131,6 +148,9 @@ def inspect_page(text, url):
     result = parse_detail(text, url)
     emit("result", status=result.status, reason=result.reason, sku_count=len(result.skus),
          main_image=bool(result.main_image), warnings=result.warnings,
+         specification_image_options=len(result.specification_images),
+         specification_image_urls=sum(i.image_url is not None for i in result.specification_images),
+         specification_image_nulls=sum(i.image_url is None for i in result.specification_images),
          seller_user_id_returned=isinstance(result.seller_user_id, str) and bool(result.seller_user_id),
          seller_member_id_returned=isinstance(result.seller_member_id, str) and bool(result.seller_member_id),
          positions=sorted({s.position for row in result.skus for s in row.specifications}),
