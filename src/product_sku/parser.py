@@ -7,6 +7,7 @@ from .extraction import (MAX_BYTES, MAX_CANDIDATES, MAX_DEPTH, MAX_NODES,
 from .models import Sku, SkuResult, Specification
 from .urls import normalize_url
 from .specification_images import OptionImages
+from .spec_ids import SpecIds
 
 FIELD = "pieceWeightScaleInfo"
 IDENTITY_KEYS = ("offerId", "productId", "itemId")
@@ -215,6 +216,7 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
     warnings: set[str] = set()
     total = 0
     delimiter = chr(38) + "gt;"
+    spec_ids = SpecIds()
     for model in models:
         rows = _path(model, "tradeModel", "skuMap")
         props = _path(model, "offerDetail", "skuProps")
@@ -257,6 +259,7 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
             sku_id = identifier(row["skuId"])
             sku = Sku(sku_id, [Specification(i, f"sku{i}", part, name)
                                for i, (part, name) in enumerate(zip(parts, names), 1)])
+            spec_ids.add(sku_id, row.get("specId"))
             if images is not None:
                 images.add(sku, props)
             if sku_id in conflicts:
@@ -267,7 +270,9 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
                 warnings.add("conflicting_sku_rows")
             else:
                 found[sku_id] = sku
-    return list(found.values()), sorted(warnings)
+    skus, spec_warnings = spec_ids.finish(list(found.values()))
+    warnings.update(spec_warnings)
+    return skus, sorted(warnings)
 
 
 def parse_detail(text: str, url: str) -> SkuResult:

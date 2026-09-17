@@ -96,6 +96,18 @@ def inspect_page(text, url):
                                 emit("trade_list_schema", field=key, count=len(child), item_type=type(child[0]).__name__ if child else None,
                                      fields=list(child[0]) if child and isinstance(child[0], dict) else [])
             if isinstance(sku_map, list):
+                spec_ids = [row.get("specId") for row in sku_map if isinstance(row, dict)]
+                nonempty = [value for value in spec_ids if isinstance(value, str) and value.strip()]
+                pairs = [(identifier(row.get("skuId")), row.get("specId")) for row in sku_map
+                         if isinstance(row, dict) and isinstance(row.get("specId"), str)]
+                emit("spec_id_summary", model_verified=_verified_model(root, PRODUCT_ID) is not None,
+                     rows=len(sku_map), present=sum("specId" in row for row in sku_map if isinstance(row, dict)),
+                     nonempty_strings=len(nonempty), unique_ids=len(set(nonempty)),
+                     lengths=sorted({len(value) for value in nonempty}),
+                     hex32_count=sum(bool(re.fullmatch(r"[0-9a-fA-F]{32}", value)) for value in nonempty),
+                     distinct_sku_ids=len({sku for sku, _ in pairs if sku is not None}),
+                     unique_pairs=len(set(pairs)),
+                     equal_to_sku_id=sum(sku == spec for sku, spec in pairs))
                 counts = {}
                 for row in sku_map:
                     attrs = row.get("specAttrs") if isinstance(row, dict) else None
@@ -148,6 +160,8 @@ def inspect_page(text, url):
     result = parse_detail(text, url)
     emit("result", status=result.status, reason=result.reason, sku_count=len(result.skus),
          main_image=bool(result.main_image), warnings=result.warnings,
+         spec_ids_returned=sum(s.spec_id is not None for s in result.skus),
+         unique_spec_ids_returned=len({s.spec_id for s in result.skus if s.spec_id is not None}),
          specification_image_options=len(result.specification_images),
          specification_image_urls=sum(i.image_url is not None for i in result.specification_images),
          specification_image_nulls=sum(i.image_url is None for i in result.specification_images),

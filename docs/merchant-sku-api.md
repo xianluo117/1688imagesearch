@@ -1,8 +1,19 @@
-# 获取商家 ID 与 SKU ID API
+# 一次查询商家 ID、规格图片 URL 与 SKU ID API
 
 ## 1. 用途与标识说明
 
-提交一个1688商品详情链接，同步返回商品的卖家标识、SKU ID及各SKU对应的规格名称、规格值和位置。无需先发起图搜任务，无需轮询。
+**只调用一次 POST /api/v1/product-skus，提交一个1688商品详情链接，即在同一个响应中返回商家ID、规格图片URL和SKU ID。无需分别调用商家、图片或规格接口，也不需要额外开启参数。**
+
+同时返回规格名称、规格值和位置。无需先发起图搜任务，无需轮询。服务器从本次详情查询的数据中提取这些信息；请求可能按既定规则发生重定向或有限网络重试，但不会为了商家或规格图片另查接口，也不会下载图片。
+
+| 需要的数据 | 在同一响应中的读取位置 |
+|---|---|
+| 商家数字用户ID | 顶层 [`seller_user_id`](../src/api/sku_schemas.py:29) |
+| 商家会员ID | 顶层 [`seller_member_id`](../src/api/sku_schemas.py:30) |
+| SKU ID | [`skus`](../src/api/sku_schemas.py:25) 数组内每条记录的 [`sku_id`](../src/product_sku/models.py:16) |
+| 规格图片URL | 顶层 [`specification_images`](../src/api/sku_schemas.py:31) 数组内的 [`image_url`](../src/product_sku/models.py:26) |
+
+同色不同尺码共用颜色选项的图片记录，不把URL重复放到每条SKU中。图片记录与SKU通过规格位置、字段、名称和值对应，不按数组下标对应。无法可靠获取的商家ID或图片URL返回空值，并不保证每次查询都能得到非空值。
 
 | 标识 | 响应字段 | 含义 |
 |---|---|---|
@@ -11,7 +22,7 @@
 | 规格组合ID（SKU ID） | [`sku_id`](../src/product_sku/models.py:16) | 一个可售规格组合的标识，例如“蓝色 + M” |
 | 商品ID | [`product_id`](../src/api/sku_schemas.py:16) | 详情链接中的商品编号，不是SKU ID |
 
-**本文“规格ID”指SKU ID，不是某个颜色或尺码选项的独立ID。接口不返回上游内部规格标识或规格属性ID。** 商家数字用户ID和会员ID也不等同于店铺ID或登录名。
+**SKU ID与上游规格标识是不同字段，不能互相替代。** 每条SKU同时保留 [`sku_id`](../src/product_sku/models.py:16) 和新增的 [`spec_id`](../src/product_sku/models.py:18)。后者取自同一已验证交易行的上游规格标识，不是单个颜色或尺码选项ID。其他程序要求哪种标识，以该程序的接口契约为准；本项目未验证其他程序的兼容性。商家数字用户ID和会员ID也不等同于店铺ID或登录名。
 
 ## 2. 请求
 
@@ -59,9 +70,15 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
   "main_image": null,
   "seller_user_id": "987654321012345678",
   "seller_member_id": "synthetic_member_01",
+  "specification_images": [
+    {"position": 1, "field": "sku1", "name": "颜色", "value": "蓝色", "image_url": "https://img.example/blue.jpg"},
+    {"position": 2, "field": "sku2", "name": "尺码", "value": "M", "image_url": null},
+    {"position": 2, "field": "sku2", "name": "尺码", "value": "L", "image_url": null}
+  ],
   "skus": [
     {
       "sku_id": "900000000000000001",
+      "spec_id": "0123456789abcdef0123456789ABCDEF",
       "specifications": [
         {"position": 1, "field": "sku1", "value": "蓝色", "name": "颜色"},
         {"position": 2, "field": "sku2", "value": "M", "name": "尺码"}
@@ -69,6 +86,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
     },
     {
       "sku_id": "900000000000000002",
+      "spec_id": "abcdef0123456789abcdef0123456789",
       "specifications": [
         {"position": 1, "field": "sku1", "value": "蓝色", "name": "颜色"},
         {"position": 2, "field": "sku2", "value": "L", "name": "尺码"}
@@ -90,19 +108,21 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 | [`seller_user_id`](../src/api/sku_schemas.py:29) | 字符串或空值 | 卖家数字用户ID，不转换为浮点或普通前端数值 |
 | [`seller_member_id`](../src/api/sku_schemas.py:30) | 字符串或空值 | 卖家会员ID，保留大小写 |
 | [`skus`](../src/api/sku_schemas.py:25) | 数组 | 当前解析得到的有效SKU |
+| [`specification_images`](../src/api/sku_schemas.py:31) | 数组 | 同一次查询返回的去重规格选项及可空图片URL，见第3.3节 |
 | [`sku_count`](../src/api/sku_schemas.py:28) | 整数 | 返回SKU数组长度，不代表平台全部SKU总数 |
 | [`status`](../src/api/sku_schemas.py:18) | 字符串 | 业务状态，见第5节 |
 | [`reason`](../src/api/sku_schemas.py:22) | 字符串 | 分类原因，例如找到SKU数据或字段缺失 |
 | [`warnings`](../src/api/sku_schemas.py:26) | 字符串数组 | 数据限制、冲突或字段无法验证的提示 |
 | [`completeness`](../src/api/sku_schemas.py:27) | 字符串 | 当前为 unknown，不承诺SKU完整覆盖 |
 | [`source`](../src/api/sku_schemas.py:23) | 字符串 | 当前为 detail_html |
-| [`main_image`](../src/api/sku_schemas.py:24) | 字符串或空值 | 兼容保留；新交易模型路径不提取图片，返回空值 |
+| [`main_image`](../src/api/sku_schemas.py:24) | 字符串或空值 | 商品主图兼容字段；新交易模型路径返回空值。规格图片请读取独立规格图片列表，不读取此字段 |
 
 ### 3.2 SKU与规格字段
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| [`sku_id`](../src/product_sku/models.py:16) | 字符串 | 实际SKU ID，不根据选项组合生成 |
+| [`sku_id`](../src/product_sku/models.py:16) | 字符串 | 实际SKU ID，不根据选项组合生成，继续保留 |
+| [`spec_id`](../src/product_sku/models.py:18) | 字符串或空值 | 同一交易行的上游规格标识，原样返回并保留大小写；不是SKU ID |
 | [`specifications`](../src/product_sku/models.py:17) | 数组 | 该SKU的规格项 |
 | [`position`](../src/product_sku/models.py:8) | 整数 | 从1开始的规格位置，不能当作规格ID |
 | [`field`](../src/product_sku/models.py:9) | 字符串 | 位置字段，例如 sku1、sku2 |
@@ -110,6 +130,16 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 | [`value`](../src/product_sku/models.py:10) | 字符串或空值 | 规格值，保留原始内容；旧来源缺失位置可能为空 |
 
 规格按位置读取，不应假定第1维总是颜色、第2维总是尺码。数据来源不同，规格维度数也可能不同。
+
+### 规格标识规则
+
+- 新增字段随SKU、商家ID及规格图片列表在同一次查询中返回，不需要额外参数或额外接口。
+- 仅使用通过商品归属和规格组合验证的交易行。当前支持实际页面已验证的32位十六进制字符串，按不透明标识处理，不计算哈希、不转换大小写、不从SKU ID推导。
+- 缺失、旧重量表来源或不支持的格式返回空值，不删除原本有效的SKU。
+- 同一SKU对应多个不同标识、有效标识与缺失候选不一致，或同一标识被不同SKU共用时，受影响的规格标识置空并附带冲突警告。SKU本身的规格值冲突仍按原规则移除SKU。
+- 格式非法时附带 invalid_spec_id 警告；关联冲突时附带 conflicting_spec_id 警告。
+- 2026-09-17在线验证商品844515661443：24个SKU均返回非空规格标识，24个标识互不重复、均与SKU ID不同；同时返回两类商家ID和3条非空颜色图片URL。结果仅有完整性未知警告。
+- 最新96项离线回归通过。新增字段需部署并重启API才会生效；本轮规格标识改动尚未提交推送，未停止运行中的服务。
 
 ### 3.3 规格图片URL（按选项去重）
 
@@ -136,7 +166,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 - URL校验只接受明确HTTP/HTTPS地址，拒绝用户信息、控制字符、反斜杠、片段、异常端口及明显本地地址。不会解析DNS或下载图片；有效URL不保证远端当前可访问，调用方下载时仍需自己的网络安全校验。
 - 返回地址保留原查询参数，不对整页或图片值做猜测性反转义。
 
-2026-09-17独立客户端在线验证商品844515661443：24个SKU，去重后11个选项，其中3条颜色图片URL、8条尺码空值。未下载图片，日志未输出图片地址。完整离线回归87项通过。**现有API需要重启后加载新字段；本轮未自动提交或推送这些图片功能改动。**
+2026-09-17独立客户端在线验证商品844515661443：同一次查询返回两类卖家ID、24个SKU，以及去重后的11个规格选项，其中3条颜色图片URL、8条尺码空值。未下载图片，日志未输出图片地址。完整离线回归87项通过。图片功能已随提交183877d推送至origin/main。**部署端必须拉取更新并重启现有API才能加载新字段，不能将代码已推送视为服务已更新。**
 
 ## 4. 商家字段的空值与安全规则
 
@@ -200,7 +230,7 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
 1. 从后端或受信任客户端调用，不向公开浏览器代码暴露查询密钥。
 2. 只提交商品详情链接，不传Cookie、图片、图搜任务ID或额外参数。
 3. 接收响应后先检查HTTP状态，再检查业务状态与SKU数量。
-4. 读取顶层两种商家ID；逐条读取SKU ID及规格名称、值和位置。
+4. 从同一响应读取顶层两种商家ID、SKU数组和规格图片列表；逐条读取SKU ID，再根据规格位置、字段、名称和值关联图片，无需再次查询。
 5. 所有ID按字符串保存；会员ID保留大小写。建议同时保存商品ID与SKU ID。
 6. 当前数据完整性未知，不能仅根据规格选项数推断或补造SKU。
 7. 上游受限、登录失效及字段无法解析时不要无限重试。
@@ -214,7 +244,7 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
 - 重启后可在服务 /docs 查看接口说明，或在 /openapi.json 核对响应字段。
 - 2026-09-17独立新代码客户端实测商品844515661443：上游HTTP 200、24个SKU、48个带名称规格项，两类卖家ID均成功返回。
 - 此前商品898728774563已验证224个SKU；新增商家字段本轮在线验证对象为844515661443。
-- 四个测试文件共78项离线回归通过，包含API字段保留与空值测试。
+- 最新六个测试文件共96项离线回归通过，包含规格标识原值保留/冲突/空值、商家字段、规格图片去重、图片冲突置空及API契约测试。
 - 上述在线记录不等于已验证部署网站、反向代理或仍运行的旧API进程。页面结构和会话状态变化可能影响后续结果。
 
 实现参考：[查询路由](../src/api/sku.py)、[响应契约](../src/api/sku_schemas.py)、[SKU解析器](../src/product_sku/parser.py)、[结果模型](../src/product_sku/models.py)。

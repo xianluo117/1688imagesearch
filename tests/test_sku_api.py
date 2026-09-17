@@ -169,6 +169,20 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             upstream.close.assert_called_once()
             self.assertEqual(session.get.call_args.kwargs["timeout"], 20)
 
+    async def test_spec_id_contract_and_null(self):
+        await self.save_cookie()
+        spec_id = "0123456789abcdef0123456789ABCDEF"
+        for value in (spec_id, None):
+            payload = result()
+            payload.skus = [Sku("123456", [Specification(1, "sku1", "蓝色")], spec_id=value)]
+            self.fake.fetch.return_value = payload
+            response = await self.post()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["skus"][0]["sku_id"], "123456")
+            self.assertEqual(response.json()["skus"][0]["spec_id"], value)
+        schemas = self.app.openapi()["components"]["schemas"]
+        self.assertTrue(any("spec_id" in model.get("properties", {}) for model in schemas.values()))
+
     async def test_specification_images_contract(self):
         await self.save_cookie()
         payload = result()

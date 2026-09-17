@@ -15,6 +15,7 @@ class Specification:
 class Sku:
     sku_id: str
     specifications: list[Specification]
+    spec_id: str | None = None
 
 
 @dataclass(frozen=True)
