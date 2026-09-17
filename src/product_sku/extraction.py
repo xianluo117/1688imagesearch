@@ -82,6 +82,80 @@ class Page(HTMLParser):
         return image
 
 
+def skip_function_body(script: str, start: int) -> int:
+    """Skip opaque code, not data. Unknown lexical forms fail closed."""
+    depth = 0
+    index = start
+    while index < len(script):
+        char = script[index]
+        if char in "\"'`":
+            quote = char
+            index += 1
+            while index < len(script):
+                if script[index] == "\\":
+                    index += 2
+                elif script[index] == quote:
+                    index += 1
+                    break
+                elif quote == "`" and script.startswith("${", index):
+                    raise DecodeLimit("unsupported_function_template")
+                else:
+                    index += 1
+            else:
+                raise DecodeLimit("invalid_function_wrapper")
+            continue
+        if script.startswith("//", index):
+            end = script.find("\n", index + 2)
+            index = len(script) if end < 0 else end + 1
+            continue
+        if script.startswith("/*", index):
+            end = script.find("*/", index + 2)
+            if end < 0:
+                raise DecodeLimit("invalid_function_wrapper")
+            index = end + 2
+            continue
+        if char == "/":
+            # Do not guess regex-versus-division or braces inside regex literals.
+            raise DecodeLimit("unsupported_function_token")
+        if char == "{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise DecodeLimit("structure_limit")
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    raise DecodeLimit("invalid_function_wrapper")
+
+
+def raw_data_decode(decoder: json.JSONDecoder, script: str, start: int) -> tuple[Any, int]:
+    """JSON plus canonical safe-integer JS property names; no expressions.
+
+    Only a decoder-confirmed property-name position is normalized. The entire
+    outer object must then decode successfully, with duplicate-key rejection.
+    """
+    normalized = script
+    inserted = 0
+    for _ in range(MAX_CANDIDATES):
+        try:
+            obj, end = decoder.raw_decode(normalized, start)
+            return obj, end - inserted
+        except json.JSONDecodeError as exc:
+            if exc.msg != "Expecting property name enclosed in double quotes":
+                raise
+            match = re.match(r"(0|[1-9][0-9]{0,15})\s*:", normalized[exc.pos:])
+            if not match or int(match.group(1)) > 9007199254740991:
+                raise
+            end = exc.pos + len(match.group(1))
+            normalized = normalized[:exc.pos] + '"' + normalized[exc.pos:end] + '"' + normalized[end:]
+            inserted += 2
+    raise DecodeLimit("numeric_key_limit")
+
+
+FUNCTION = re.compile(r"function\s*(?:[A-Za-z_$][\w$]*\s*)?\(\s*(?:[A-Za-z_$][\w$]*\s*(?:,\s*[A-Za-z_$][\w$]*\s*)*)?\)\s*\{")
+
+
 def json_roots(page: Page) -> tuple[list[Any], bool]:
     decoder = json.JSONDecoder(object_pairs_hook=unique_object,
                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
@@ -92,6 +166,11 @@ def json_roots(page: Page) -> tuple[list[Any], bool]:
         index = 0
         while index < len(script):
             char = script[index]
+            if script.startswith("function", index) and (index == 0 or not re.match(r"[\w$]", script[index - 1])):
+                function = FUNCTION.match(script, index)
+                if function:
+                    index = skip_function_body(script, function.end() - 1)
+                    continue
             if script.startswith("//", index):
                 end = script.find("\n", index + 2)
                 index = len(script) if end < 0 else end + 1
@@ -119,7 +198,9 @@ def json_roots(page: Page) -> tuple[list[Any], bool]:
             if attempts > MAX_CANDIDATES:
                 raise DecodeLimit("candidate_limit")
             try:
-                obj, end = decoder.raw_decode(script, index)
+                obj, end = raw_data_decode(decoder, script, index)
+            except DecodeLimit:
+                raise
             except (ValueError, RecursionError):
                 # Do not salvage inner objects from an invalid outer business object.
                 malformed |= "pieceWeightScaleInfo" in script[index:]

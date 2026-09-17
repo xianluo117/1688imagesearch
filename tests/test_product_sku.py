@@ -131,6 +131,131 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(parse_detail(html, URL).ok)
 
 
+def model_page():
+    return {"result": {"global": {"globalData": {
+        "parametersMap": {"offerId": PID},
+        "model": {"offerDetail": {"offerId": PID}, "tradeModel": {"offerId": PID},
+                  "detailDescription": {"pieceWeightScale": {"pieceWeightScaleInfo": [ROW]}}},
+    }}}}
+
+
+class ObservedStructureTests(unittest.TestCase):
+    def test_function_wrapper_and_numeric_keys(self):
+        raw = json.dumps(model_page())
+        raw = raw[:-1] + ', "module": {12: {"name": "synthetic"}}}'
+        wrapper = '(function(a,b){var c={}; for(var k in a){if(a[k]){c[k]=a[k]}} return c})(window.seed,'
+        result = parse_detail('<script>window.DATA=' + wrapper + raw + ');</script>', URL)
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.skus), 1)
+        self.assertEqual([s.position for s in result.skus[0].specifications], [1, 2, 3])
+
+    def test_complete_object_required(self):
+        for suffix in (',"broken":[}', ',"broken":undefined}', ',"broken":run()}', ',"module":{12:1,"12":2}}'):
+            raw = json.dumps(model_page())[:-1] + suffix
+            self.assertFalse(parse_detail('<script>' + raw + '</script>', URL).ok)
+
+    def test_all_three_identities_required(self):
+        for name in ("parametersMap", "offerDetail", "tradeModel"):
+            for invalid in (None, "123", True):
+                value = model_page()
+                glob = value["result"]["global"]["globalData"]
+                source = glob[name] if name == "parametersMap" else glob["model"][name]
+                source["offerId"] = invalid
+                self.assertFalse(parse_detail(page(value), URL).ok)
+
+    def test_conflict_and_recommendation_exclusion(self):
+        value = model_page()
+        value["result"]["global"]["globalData"]["model"]["offerDetail"]["productId"] = "123"
+        self.assertFalse(parse_detail(page(value), URL).ok)
+        self.assertFalse(parse_detail(page({"recommendations": model_page()}), URL).ok)
+
+    def test_no_generic_sibling_inheritance(self):
+        value = {"offerDetail": {"offerId": PID}, "detailDescription": {"pieceWeightScaleInfo": [ROW]}}
+        self.assertFalse(parse_detail(page(value), URL).ok)
+
+    def test_function_body_is_opaque(self):
+        html = '<script>function f(){var hidden=' + json.dumps(business()) + ';}</script>'
+        self.assertFalse(parse_detail(html, URL).ok)
+        html = '<script>{bad:function(){return 1},"child":' + json.dumps(business()) + '}</script>'
+        self.assertFalse(parse_detail(html, URL).ok)
+
+    def test_wrapper_comments_and_strings(self):
+        wrapper = 'function f(){/* } */ var x="}"; // }\\n return {x:1};} '
+        self.assertTrue(parse_detail('<script>' + wrapper.replace('\\n', '\n') + json.dumps(business()) + '</script>', URL).ok)
+
+    def test_numeric_key_limits_and_duplicates(self):
+        for keys in ('01:0', '9007199254740992:0', '1:0,"1":1'):
+            raw = json.dumps(business())[:-1] + ',"module":{' + keys + '}}'
+            self.assertFalse(parse_detail('<script>' + raw + '</script>', URL).ok)
+
+
+def trade_page():
+    value = model_page()
+    model = value["result"]["global"]["globalData"]["model"]
+    model["detailDescription"]["pieceWeightScale"]["pieceWeightScaleInfo"] = [{"weight": 1}]
+    model["offerDetail"]["skuProps"] = [
+        {"fid": 1, "prop": "颜色", "value": [{"name": "蓝色"}, {"name": "红色"}]},
+        {"fid": 2, "prop": "尺寸", "value": [{"name": "L"}, {"name": "M"}]},
+    ]
+    model["tradeModel"]["skuMap"] = [{"skuId": "901", "specAttrs": "蓝色" + chr(38) + "gt;L"}]
+    return value, model
+
+
+class TradeModelTests(unittest.TestCase):
+    def test_named_positions_no_images_no_cartesian_generation(self):
+        value, _ = trade_page()
+        result = parse_detail(page(value), URL)
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.skus), 1)
+        self.assertEqual(result.skus[0].sku_id, "901")
+        self.assertEqual([(s.position, s.name, s.value) for s in result.skus[0].specifications],
+                         [(1, "颜色", "蓝色"), (2, "尺寸", "L")])
+        self.assertIsNone(result.main_image)
+        self.assertEqual(result.warnings, ["sku_completeness_unknown"])
+
+    def test_bad_mapping_is_not_guessed(self):
+        for attrs in ("L" + chr(38) + "gt;蓝色", "蓝色>L", "蓝色", "绿色" + chr(38) + "gt;L"):
+            value, model = trade_page()
+            model["tradeModel"]["skuMap"][0]["specAttrs"] = attrs
+            self.assertFalse(parse_detail(page(value), URL).ok)
+
+    def test_missing_conflicting_identities_and_recommendations(self):
+        for name in ("offerDetail", "tradeModel"):
+            value, model = trade_page()
+            model[name]["offerId"] = "123"
+            self.assertFalse(parse_detail(page(value), URL).ok)
+        value, _ = trade_page()
+        self.assertFalse(parse_detail(page({"related": value}), URL).ok)
+        value["offerId"] = "123"
+        self.assertFalse(parse_detail(page(value), URL).ok)
+
+    def test_duplicate_names_values_and_separator_ambiguity(self):
+        for mode in ("name", "value", "delimiter"):
+            value, model = trade_page()
+            props = model["offerDetail"]["skuProps"]
+            if mode == "name":
+                props[1]["prop"] = props[0]["prop"]
+            elif mode == "value":
+                props[0]["value"].append(props[0]["value"][0])
+            else:
+                props[0]["value"][0]["name"] += chr(38) + "gt;"
+            self.assertFalse(parse_detail(page(value), URL).ok)
+
+    def test_conflicting_rows_removed(self):
+        value, model = trade_page()
+        model["tradeModel"]["skuMap"] += [
+            {"skuId": "901", "specAttrs": "红色" + chr(38) + "gt;L"},
+            {"skuId": "902", "specAttrs": "蓝色" + chr(38) + "gt;M"}]
+        result = parse_detail(page(value), URL)
+        self.assertEqual([s.sku_id for s in result.skus], ["902"])
+        self.assertIn("conflicting_sku_rows", result.warnings)
+
+    def test_broken_outer_trade_data_not_salvaged(self):
+        value, _ = trade_page()
+        raw = json.dumps(value)[:-1] + ',"broken":[}'
+        self.assertFalse(parse_detail('<script>' + raw + '</script>', URL).ok)
+
+
 class UrlCookieTests(unittest.TestCase):
     def test_url_normalization(self):
         self.assertEqual(normalize_url(URL.replace("https", "http") + "?trace=secret#x"), (PID, URL))

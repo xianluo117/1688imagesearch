@@ -20,7 +20,46 @@ def identifier(value: Any) -> str | None:
     return None
 
 
-def _arrays(roots: list[Any], product_id: str) -> tuple[list[Any], bool]:
+def _path(value: Any, *keys: str) -> Any:
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _verified_model(value: dict, product_id: str) -> Any:
+    """Observed page schema only, never infer ownership from arbitrary siblings."""
+    global_data = _path(value, "result", "global", "globalData")
+    sources = [
+        _path(global_data, "parametersMap"),
+        _path(global_data, "model", "offerDetail"),
+        _path(global_data, "model", "tradeModel"),
+    ]
+    for source in sources:
+        if not isinstance(source, dict) or identifier(source.get("offerId")) != product_id:
+            return None
+        if any(identifier(source[k]) != product_id for k in IDENTITY_KEYS if k in source):
+            return None
+    for source in (value, _path(value, "result"), _path(value, "result", "global"), global_data, _path(global_data, "model")):
+        if not isinstance(source, dict) or "id" in source or any(identifier(source[k]) != product_id for k in IDENTITY_KEYS if k in source):
+            return None
+    return global_data["model"]
+
+
+def _model_array(value: dict, product_id: str) -> Any:
+    model = _verified_model(value, product_id)
+    description = _path(model, "detailDescription")
+    scale = _path(description, "pieceWeightScale")
+    for source in (description, scale):
+        if not isinstance(source, dict):
+            return None
+        if "id" in source or any(identifier(source[k]) != product_id for k in IDENTITY_KEYS if k in source):
+            return None
+    return scale.get(FIELD)
+
+
+def _arrays(roots: list[Any], product_id: str, models: list[Any] | None = None) -> tuple[list[Any], bool]:
     arrays: list[Any] = []
     unscoped = False
     nodes = 0
@@ -39,6 +78,16 @@ def _arrays(roots: list[Any], product_id: str) -> tuple[list[Any], bool]:
             for child in value:
                 walk(child, None, depth + 1)
         elif isinstance(value, dict):
+            model = _verified_model(value, product_id)
+            if model is not None and models is not None:
+                models.append(model)
+                if len(models) > MAX_CANDIDATES:
+                    raise DecodeLimit("candidate_limit")
+            model_array = _model_array(value, product_id)
+            if model_array is not None:
+                arrays.append(model_array)
+                if len(arrays) > MAX_CANDIDATES:
+                    raise DecodeLimit("candidate_limit")
             identities = [identifier(value[key]) for key in IDENTITY_KEYS if key in value]
             if identities:
                 owner = identities[0] if None not in identities and len(set(identities)) == 1 else "!conflict"
@@ -118,6 +167,65 @@ def _rows(arrays: list[Any]) -> tuple[list[Sku], list[str], bool]:
     return list(found.values()), sorted(warnings), malformed
 
 
+def _trade_skus(models: list[Any], product_id: str) -> tuple[list[Sku], list[str]]:
+    found: dict[str, Sku] = {}
+    conflicts: set[str] = set()
+    warnings: set[str] = set()
+    total = 0
+    delimiter = chr(38) + "gt;"
+    for model in models:
+        rows = _path(model, "tradeModel", "skuMap")
+        props = _path(model, "offerDetail", "skuProps")
+        if rows is None:
+            continue
+        if not isinstance(rows, list) or not isinstance(props, list) or not 1 <= len(props) <= 32:
+            warnings.add("invalid_trade_schema")
+            continue
+        names, choices = [], []
+        for prop in props:
+            if not isinstance(prop, dict) or not isinstance(prop.get("prop"), str) or not prop["prop"].strip():
+                break
+            values = prop.get("value")
+            if not isinstance(values, list) or not values or len(values) > MAX_NODES:
+                break
+            allowed = [v.get("name") if isinstance(v, dict) else None for v in values]
+            if any(not isinstance(v, str) or not v.strip() or delimiter in v for v in allowed):
+                break
+            if len(set(allowed)) != len(allowed) or prop["prop"] in names:
+                break
+            names.append(prop["prop"])
+            choices.append(set(allowed))
+        if len(names) != len(props):
+            warnings.add("invalid_trade_specifications")
+            continue
+        for row in rows:
+            total += 1
+            if total > MAX_NODES:
+                raise DecodeLimit("row_limit")
+            if not isinstance(row, dict) or not identifier(row.get("skuId")) or not isinstance(row.get("specAttrs"), str):
+                warnings.add("invalid_trade_rows")
+                continue
+            if any(identifier(row[k]) != product_id for k in IDENTITY_KEYS if k in row):
+                warnings.add("invalid_trade_rows")
+                continue
+            parts = row["specAttrs"].split(delimiter)
+            if len(parts) != len(names) or any(part not in allowed for part, allowed in zip(parts, choices)):
+                warnings.add("unverified_trade_specifications")
+                continue
+            sku_id = identifier(row["skuId"])
+            sku = Sku(sku_id, [Specification(i, f"sku{i}", part, name)
+                               for i, (part, name) in enumerate(zip(parts, names), 1)])
+            if sku_id in conflicts:
+                continue
+            if sku_id in found and found[sku_id] != sku:
+                del found[sku_id]
+                conflicts.add(sku_id)
+                warnings.add("conflicting_sku_rows")
+            else:
+                found[sku_id] = sku
+    return list(found.values()), sorted(warnings)
+
+
 def parse_detail(text: str, url: str) -> SkuResult:
     product_id, canonical = normalize_url(url)
     result = SkuResult(product_id, canonical, "parse_failed", "invalid_json")
@@ -131,7 +239,20 @@ def parse_detail(text: str, url: str) -> SkuResult:
             result.reason = "explicit_access_page"
             return result
         roots, malformed_json = json_roots(page)
-        arrays, unscoped = _arrays(roots, product_id)
+        models: list[Any] = []
+        arrays, unscoped = _arrays(roots, product_id, models)
+        trade_skus, trade_warnings = _trade_skus(models, product_id)
+        if trade_skus:
+            result.skus = trade_skus
+            result.warnings = trade_warnings + ["sku_completeness_unknown"]
+            if malformed_json:
+                result.warnings.append("malformed_other_candidate")
+            result.status, result.reason = "partial_success", "sku_data_found"
+            return result
+        if trade_warnings:
+            result.warnings = trade_warnings
+            result.reason = "unverified_trade_data"
+            return result
         if not arrays:
             if malformed_json:
                 result.reason = "invalid_json"
