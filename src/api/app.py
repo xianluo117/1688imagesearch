@@ -12,6 +12,7 @@ from .auth import require_api_key
 from .config import Settings
 from .cookie_store import CookieStore
 from .database import Database, ProductTaskRecord, UploadTaskRecord
+from .response_encoding import JsonCharsetMiddleware
 from .schemas import (
     CookieUploadResponse,
     DetailedHealthResponse,
@@ -107,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="2.0.0",
         lifespan=lifespan,
     )
+    app.add_middleware(JsonCharsetMiddleware)
     app.state.settings = resolved
     app.state.database = database
     app.state.cookie_store = cookie_store

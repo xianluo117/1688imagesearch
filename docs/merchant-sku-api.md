@@ -56,6 +56,16 @@
 
 客户端需向实际部署地址发送上述请求体，并设置两个请求头：Content-Type 为 application/json；X-API-Key 为本地安全配置的查询密钥。
 
+### 2.2 响应编码与客户端读取
+
+- JSON 响应正文使用 UTF-8 编码。编码兼容中间件为未声明字符集的 JSON 响应补充 `Content-Type: application/json; charset=utf-8`，不改写正文、标识或图片地址。
+- 调用方应按 UTF-8 解码响应字节，再解析 JSON。不得按系统默认 ANSI、GBK 或 Latin-1 解码，也不要对已经正确解码的中文重复转码。
+- Windows PowerShell 5.1 读取旧服务响应时，可能因响应头未声明字符集而出现乱码。旧服务尚未更新时，应显式按 UTF-8 解码原始响应流；仅设置终端输出编码不能修复 HTTP 解码错误。
+- 2026-09-17 对部署服务的商品1046759477024进行验证：响应头为 application/json，原始响应字节按 UTF-8 解码后颜色、尺码中文正确；确认本次乱码来自客户端解码，而不是服务器商品数据损坏。
+- 本次兼容修改已通过5项离线测试，覆盖中文与标识保留、错误响应、已有字符集、不改动非JSON响应和JSON扩展媒体类型。**需要部署更新并重启API后，新的响应头才会在服务器生效；尚未进行部署后的在线验证。**
+
+实现见[响应编码中间件](../src/api/response_encoding.py)、[应用接入](../src/api/app.py)和[编码测试](../tests/test_response_encoding.py)。
+
 ## 3. 成功响应
 
 HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标识为**合成示例**，不是实际商家或SKU数据。完整字段定义见[API响应模型](../src/api/sku_schemas.py:15)和[SKU结果模型](../src/product_sku/models.py:6)。
