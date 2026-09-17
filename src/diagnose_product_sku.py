@@ -16,7 +16,7 @@ from api.cookie_store import CookieStore
 from api.database import Database
 from product_sku.client import ProductSkuClient
 from product_sku.extraction import Page, json_roots
-from product_sku.parser import _path, parse_detail
+from product_sku.parser import _path, _verified_model, identifier, parse_detail
 from product_sku.urls import normalize_url
 
 PRODUCT_ID = "898728774563"
@@ -39,6 +39,17 @@ def inspect_page(text, url):
             if not isinstance(global_data, dict):
                 continue
             model = _path(global_data, "model")
+            base = _path(root, "result", "data", "Root", "fields", "dataJson", "offerBaseInfo")
+            if isinstance(base, dict):
+                emit("seller_identity", model_verified=_verified_model(root, PRODUCT_ID) is not None,
+                     offer_match=identifier(base.get("offerId")) == PRODUCT_ID,
+                     seller_user_id_present="sellerUserId" in base,
+                     seller_user_id_valid=identifier(base.get("sellerUserId")) is not None,
+                     seller_member_id_present=isinstance(base.get("sellerMemberId"), str) and bool(base["sellerMemberId"]),
+                     seller_login_id_present=isinstance(base.get("sellerLoginId"), str) and bool(base["sellerLoginId"]),
+                     seller_buyer_id_distinct=identifier(base.get("sellerUserId")) is not None and identifier(base.get("buyerUserId")) is not None and identifier(base.get("sellerUserId")) != identifier(base.get("buyerUserId")))
+            else:
+                emit("seller_identity", base_present=False)
             scale = _path(model, "detailDescription", "pieceWeightScale")
             rows = _path(scale, "pieceWeightScaleInfo")
             columns = _path(scale, "columnList")
@@ -120,6 +131,8 @@ def inspect_page(text, url):
     result = parse_detail(text, url)
     emit("result", status=result.status, reason=result.reason, sku_count=len(result.skus),
          main_image=bool(result.main_image), warnings=result.warnings,
+         seller_user_id_returned=isinstance(result.seller_user_id, str) and bool(result.seller_user_id),
+         seller_member_id_returned=isinstance(result.seller_member_id, str) and bool(result.seller_member_id),
          positions=sorted({s.position for row in result.skus for s in row.specifications}),
          named_specifications=sum(s.name is not None for row in result.skus for s in row.specifications))
     return result

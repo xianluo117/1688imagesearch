@@ -28,6 +28,8 @@ class SkuResult:
     skus: list[Sku] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     completeness: str = "unknown"
+    seller_user_id: str | None = None
+    seller_member_id: str | None = None
 
     @property
     def ok(self) -> bool:

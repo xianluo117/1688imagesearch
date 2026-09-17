@@ -26,3 +26,5 @@ class ProductSkuResponse(BaseModel):
     warnings: list[str]
     completeness: Literal["unknown", "complete", "partial"]
     sku_count: int
+    seller_user_id: str | None = None
+    seller_member_id: str | None = None

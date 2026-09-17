@@ -169,6 +169,23 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             upstream.close.assert_called_once()
             self.assertEqual(session.get.call_args.kwargs["timeout"], 20)
 
+    async def test_seller_ids_preserved_and_missing_are_null(self):
+        await self.save_cookie()
+        for user_id, member_id in (("987654321012345678", "synthetic_member-01"), (None, None)):
+            payload = result()
+            payload.seller_user_id = user_id
+            payload.seller_member_id = member_id
+            self.fake.fetch.return_value = payload
+            response = await self.post()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["seller_user_id"], user_id)
+            self.assertEqual(response.json()["seller_member_id"], member_id)
+            self.assertNotIn("buyer_user_id", response.json())
+            self.assertNotIn("seller_login_id", response.json())
+        properties = self.app.openapi()["components"]["schemas"]["ProductSkuResponse"]["properties"]
+        self.assertIn("seller_user_id", properties)
+        self.assertIn("seller_member_id", properties)
+
     async def test_classified_failures_keep_result_and_warnings(self):
         await self.save_cookie()
         for status, code in (

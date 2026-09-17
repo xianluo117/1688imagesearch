@@ -59,7 +59,42 @@ def _model_array(value: dict, product_id: str) -> Any:
     return scale.get(FIELD)
 
 
-def _arrays(roots: list[Any], product_id: str, models: list[Any] | None = None) -> tuple[list[Any], bool]:
+def _seller_candidate(value: dict, product_id: str) -> dict | None:
+    if _verified_model(value, product_id) is None:
+        return None
+    node = value
+    for key in ("result", "data", "Root", "fields", "dataJson", "offerBaseInfo"):
+        node = _path(node, key)
+        if not isinstance(node, dict) or any(identifier(node[k]) != product_id for k in IDENTITY_KEYS if k in node):
+            return None
+    return node if identifier(node.get("offerId")) == product_id else None
+
+
+def _set_seller(result: SkuResult, candidates: list[dict]) -> None:
+    # Validate each namespace independently. Never use buyer IDs or login names.
+    for source, target in (("sellerUserId", "seller_user_id"), ("sellerMemberId", "seller_member_id")):
+        values = set()
+        invalid = False
+        for candidate in candidates:
+            raw = candidate.get(source)
+            if raw is None:
+                continue
+            if source == "sellerUserId":
+                value = identifier(raw)
+            else:
+                value = raw if isinstance(raw, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", raw) else None
+            if value is None:
+                invalid = True
+            else:
+                values.add(value)
+        if len(values) == 1 and not invalid:
+            setattr(result, target, next(iter(values)))
+        elif invalid or len(values) > 1:
+            result.warnings.append(target + "_unverified")
+
+
+def _arrays(roots: list[Any], product_id: str, models: list[Any] | None = None,
+            sellers: list[dict] | None = None) -> tuple[list[Any], bool]:
     arrays: list[Any] = []
     unscoped = False
     nodes = 0
@@ -78,6 +113,12 @@ def _arrays(roots: list[Any], product_id: str, models: list[Any] | None = None) 
             for child in value:
                 walk(child, None, depth + 1)
         elif isinstance(value, dict):
+            if sellers is not None:
+                seller = _seller_candidate(value, product_id)
+                if seller is not None:
+                    sellers.append(seller)
+                    if len(sellers) > MAX_CANDIDATES:
+                        raise DecodeLimit("candidate_limit")
             model = _verified_model(value, product_id)
             if model is not None and models is not None:
                 models.append(model)
@@ -240,7 +281,8 @@ def parse_detail(text: str, url: str) -> SkuResult:
             return result
         roots, malformed_json = json_roots(page)
         models: list[Any] = []
-        arrays, unscoped = _arrays(roots, product_id, models)
+        sellers: list[dict] = []
+        arrays, unscoped = _arrays(roots, product_id, models, sellers)
         trade_skus, trade_warnings = _trade_skus(models, product_id)
         if trade_skus:
             result.skus = trade_skus
@@ -248,6 +290,7 @@ def parse_detail(text: str, url: str) -> SkuResult:
             if malformed_json:
                 result.warnings.append("malformed_other_candidate")
             result.status, result.reason = "partial_success", "sku_data_found"
+            _set_seller(result, sellers)
             return result
         if trade_warnings:
             result.warnings = trade_warnings
@@ -278,6 +321,7 @@ def parse_detail(text: str, url: str) -> SkuResult:
             result.warnings.append("main_image_unavailable")
         result.warnings.extend(["specification_names_unverified", "sku_completeness_unknown"])
         result.status, result.reason = "partial_success", "sku_data_found"
+        _set_seller(result, sellers)
     except (DecodeLimit, RecursionError, ValueError) as exc:
         result.skus = []
         result.status = "parse_failed"

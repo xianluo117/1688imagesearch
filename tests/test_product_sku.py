@@ -256,6 +256,93 @@ class TradeModelTests(unittest.TestCase):
         self.assertFalse(parse_detail('<script>' + raw + '</script>', URL).ok)
 
 
+def seller_page():
+    value, model = trade_page()
+    base = {"offerId": PID, "sellerUserId": 987654321012345678,
+            "sellerMemberId": "synthetic_member-01", "buyerUserId": 123,
+            "buyerMemberId": "synthetic_buyer", "sellerLoginId": "not-returned"}
+    value["result"]["data"] = {"Root": {"fields": {"dataJson": {"offerBaseInfo": base}}}}
+    return value, base
+
+
+class SellerTests(unittest.TestCase):
+    def test_two_namespaces_as_strings(self):
+        value, _ = seller_page()
+        result = parse_detail(page(value), URL)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.seller_user_id, "987654321012345678")
+        self.assertEqual(result.seller_member_id, "synthetic_member-01")
+        self.assertNotIn("synthetic_buyer", json.dumps(result.to_dict()))
+        self.assertNotIn("not-returned", json.dumps(result.to_dict()))
+
+    def test_no_buyer_or_login_fallback(self):
+        value, base = seller_page()
+        del base["sellerUserId"]
+        del base["sellerMemberId"]
+        result = parse_detail(page(value), URL)
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.seller_user_id)
+        self.assertIsNone(result.seller_member_id)
+
+    def test_mismatch_missing_identity_and_recommendation(self):
+        for mode in ("mismatch", "missing", "conflict", "ancestor", "recommendation"):
+            value, base = seller_page()
+            if mode == "mismatch":
+                base["offerId"] = "123"
+            elif mode == "missing":
+                del base["offerId"]
+            elif mode == "conflict":
+                base["productId"] = "123"
+            elif mode == "ancestor":
+                value["result"]["data"]["offerId"] = "123"
+            else:
+                plain, _ = trade_page()
+                plain["recommendations"] = value
+                value = plain
+            result = parse_detail(page(value), URL)
+            self.assertTrue(result.ok)
+            self.assertIsNone(result.seller_user_id)
+            self.assertIsNone(result.seller_member_id)
+
+    def test_invalid_user_id_keeps_valid_member(self):
+        for invalid in (True, 1.2, -1, "0", "1e5", " secret "):
+            value, base = seller_page()
+            base["sellerUserId"] = invalid
+            result = parse_detail(page(value), URL)
+            self.assertIsNone(result.seller_user_id)
+            self.assertEqual(result.seller_member_id, "synthetic_member-01")
+            self.assertIn("seller_user_id_unverified", result.warnings)
+
+    def test_invalid_member_id_keeps_valid_user(self):
+        for invalid in (True, 123, "", "x\n", "a b", "https://example.com", "x" * 129):
+            value, base = seller_page()
+            base["sellerMemberId"] = invalid
+            result = parse_detail(page(value), URL)
+            self.assertIsNone(result.seller_member_id)
+            self.assertEqual(result.seller_user_id, "987654321012345678")
+
+    def test_conflicting_candidates_do_not_pick_first(self):
+        first, _ = seller_page()
+        second, base = seller_page()
+        base["sellerUserId"] = "222"
+        for values in ([first, second], [second, first]):
+            result = parse_detail(page(values), URL)
+            self.assertIsNone(result.seller_user_id)
+            self.assertEqual(result.seller_member_id, "synthetic_member-01")
+            self.assertIn("seller_user_id_unverified", result.warnings)
+        base["sellerMemberId"] = "different_member"
+        result = parse_detail(page([first, second]), URL)
+        self.assertIsNone(result.seller_member_id)
+
+    def test_failure_and_broken_outer_never_expose_seller(self):
+        value, _ = seller_page()
+        raw = json.dumps(value)[:-1] + ',"broken":[}'
+        result = parse_detail('<script>' + raw + '</script>', URL)
+        self.assertFalse(result.ok)
+        self.assertIsNone(result.seller_user_id)
+        self.assertIsNone(result.seller_member_id)
+
+
 class UrlCookieTests(unittest.TestCase):
     def test_url_normalization(self):
         self.assertEqual(normalize_url(URL.replace("https", "http") + "?trace=secret#x"), (PID, URL))
