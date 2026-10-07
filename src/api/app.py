@@ -27,6 +27,7 @@ from .schemas import (
 from .worker import ProductWorkerPool, TaskCleanupService, UploadWorkerPool
 from .sku import router as sku_router
 from .sku_service import ProductSkuService
+from .sku_v2 import router as sku_v2_router
 
 
 def _error_payload(code: str | None, message: str | None) -> dict[str, str]:
@@ -116,6 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.product_workers = product_workers
     app.state.sku_service = sku_service
     app.include_router(sku_router)
+    app.include_router(sku_v2_router)
 
     @app.exception_handler(ProtocolError)
     async def protocol_error_handler(_request: Request, exc: ProtocolError) -> JSONResponse:

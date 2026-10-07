@@ -18,6 +18,29 @@ class Sku:
     spec_id: str | None = None
 
 
+    price: str | None = None
+    currency: str | None = None
+    price_source: str | None = None
+    price_basis: str | None = None
+
+
+@dataclass(frozen=True)
+class SizeDimension:
+    position: int
+    field: str
+    name: str
+    values: list[str]
+
+
+@dataclass(frozen=True)
+class ColorSizes:
+    color: Specification
+    size_position: int
+    size_field: str
+    size_name: str
+    values: list[str]
+
+
 @dataclass(frozen=True)
 class SpecificationImage:
     position: int
@@ -41,6 +64,9 @@ class SkuResult:
     seller_user_id: str | None = None
     seller_member_id: str | None = None
     specification_images: list[SpecificationImage] = field(default_factory=list)
+
+    sizes: list[SizeDimension] = field(default_factory=list)
+    color_sizes: list[ColorSizes] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

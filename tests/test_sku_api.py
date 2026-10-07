@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet
 from api.app import create_app
 from api.config import ConfigurationError, Settings
 from api.cookie_store import CookieStoreError
-from product_sku.models import Sku, SkuResult, Specification, SpecificationImage
+from product_sku.models import ColorSizes, SizeDimension, Sku, SkuResult, Specification, SpecificationImage
 from product_sku.client import ProductSkuClient
 
 URL = "https://detail.1688.com/offer/898728774563.html"
@@ -44,6 +44,7 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             patch.object(self.app.state.upload_workers, "start", AsyncMock()),
             patch.object(self.app.state.product_workers, "start", AsyncMock()),
+            patch("api.sku_service.QueryStartLimiter.wait"),
             patch("api.sku_service.ProductSkuClient"),
         ]
         for p in self.patches:
@@ -169,6 +170,33 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             upstream.close.assert_called_once()
             self.assertEqual(session.get.call_args.kwargs["timeout"], 20)
 
+    async def test_sizes_prices_contract_and_legacy_defaults(self):
+        await self.save_cookie()
+        payload = result()
+        color = Specification(1, "sku1", "蓝色", "颜色")
+        payload.sizes = [SizeDimension(2, "sku2", "尺码", ["M", "L"])]
+        payload.color_sizes = [ColorSizes(color, 2, "sku2", "尺码", ["M"])]
+        payload.skus = [Sku("123456", [color, Specification(2, "sku2", "M", "尺码")],
+                            price="39.80", currency="CNY", price_source="synthetic", price_basis="test_only")]
+        self.fake.fetch.return_value = payload
+        response = await self.post()
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["sizes"][0]["values"], ["M", "L"])
+        self.assertEqual(body["color_sizes"][0]["color"]["value"], "蓝色")
+        self.assertEqual(body["color_sizes"][0]["values"], ["M"])
+        self.assertEqual(body["skus"][0]["price"], "39.80")
+        self.assertEqual(body["skus"][0]["currency"], "CNY")
+        self.fake.fetch.return_value = result()
+        body = (await self.post()).json()
+        self.assertEqual(body["sizes"], [])
+        self.assertEqual(body["color_sizes"], [])
+        for field in ("price", "currency", "price_source", "price_basis"):
+            self.assertIsNone(body["skus"][0][field])
+        properties = self.app.openapi()["components"]["schemas"]["ProductSkuResponse"]["properties"]
+        self.assertIn("sizes", properties)
+        self.assertIn("color_sizes", properties)
+
     async def test_spec_id_contract_and_null(self):
         await self.save_cookie()
         spec_id = "0123456789abcdef0123456789ABCDEF"
@@ -232,6 +260,8 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["status"], status)
             self.assertEqual(response.json()["reason"], "fixed_reason")
             self.assertEqual(response.json()["warnings"], ["fixed_warning"])
+            self.assertEqual(response.json()["sizes"], [])
+            self.assertEqual(response.json()["color_sizes"], [])
 
     async def test_unusable_cookie_constructor_and_exception_redaction(self):
         await self.save_cookie()
@@ -294,6 +324,35 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post()).status_code, 503)
         self.release.set()
         await asyncio.wait_for(stop, 3)
+        self.fake.__exit__.assert_called_once()
+
+    async def test_start_wait_keeps_slot_and_timeout_drains_before_shutdown(self):
+        await self.save_cookie()
+        service = self.app.state.sku_service
+        service.settings = replace(self.settings, sku_query_timeout_seconds=0.05)
+        waiting = threading.Event()
+
+        def wait_for_start():
+            waiting.set()
+            if not self.release.wait(5):
+                raise RuntimeError("test release timeout")
+
+        with patch.object(service._start_limiter, "wait", side_effect=wait_for_start):
+            first = asyncio.create_task(self.post())
+            await self.wait_for(waiting.is_set)
+            self.fake.fetch.assert_not_called()
+            self.assertEqual((await self.client.get("/health")).status_code, 200)
+            self.assertEqual((await self.post()).status_code, 429)
+            response = await first
+            self.assertEqual(response.status_code, 504)
+            self.assertEqual((await self.post()).status_code, 429)
+            stop = asyncio.create_task(service.stop())
+            await asyncio.sleep(0.02)
+            self.assertFalse(stop.done())
+            self.assertEqual((await self.post()).status_code, 503)
+            self.release.set()
+            await asyncio.wait_for(stop, 3)
+        self.fake.fetch.assert_called_once_with(URL)
         self.fake.__exit__.assert_called_once()
 
     async def test_openapi_has_typed_route(self):

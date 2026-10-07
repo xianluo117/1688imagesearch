@@ -1,11 +1,9 @@
 """SKU HTTP route, independent of image-search tasks and persistence."""
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-
-from product_sku.urls import normalize_url
+from fastapi import APIRouter, Depends, Header, Request, Response
 
 from .auth import require_api_key
+from .sku_http import RESULT_HTTP_STATUS, query_failed, query_result
 from .sku_schemas import ProductSkuRequest, ProductSkuResponse
-from .sku_service import SkuServiceError
 
 router = APIRouter()
 
@@ -33,26 +31,10 @@ async def _authorize(
 async def query_product_skus(
     body: ProductSkuRequest, request: Request, response: Response,
 ) -> ProductSkuResponse:
+    result = await query_result(body.product_url, request)
     try:
-        _product_id, canonical = normalize_url(body.product_url)
-    except ValueError:
-        raise HTTPException(422, detail={
-            "code": "INVALID_PRODUCT_URL", "message": "需要标准 1688 商品详情链接",
-        }) from None
-    try:
-        result = await request.app.state.sku_service.query(canonical)
         payload = ProductSkuResponse.model_validate(result.to_dict())
-    except SkuServiceError as exc:
-        raise HTTPException(
-            exc.status_code, detail={"code": exc.code, "message": exc.message},
-        ) from None
     except Exception:
-        raise HTTPException(502, detail={
-            "code": "SKU_QUERY_FAILED", "message": "SKU 查询失败",
-        }) from None
-    response.status_code = {
-        "success": 200, "partial_success": 200, "source_not_applicable": 200,
-        "login_required": 503, "access_restricted": 502,
-        "parse_failed": 502, "network_failed": 502,
-    }[payload.status]
+        raise query_failed() from None
+    response.status_code = RESULT_HTTP_STATUS[payload.status]
     return payload

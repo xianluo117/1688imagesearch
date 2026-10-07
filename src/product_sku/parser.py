@@ -8,6 +8,8 @@ from .models import Sku, SkuResult, Specification
 from .urls import normalize_url
 from .specification_images import OptionImages
 from .spec_ids import SpecIds
+from .prices import SkuPrices
+from .size_summary import summarize_sizes
 
 FIELD = "pieceWeightScaleInfo"
 IDENTITY_KEYS = ("offerId", "productId", "itemId")
@@ -217,6 +219,7 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
     total = 0
     delimiter = chr(38) + "gt;"
     spec_ids = SpecIds()
+    prices = SkuPrices()
     for model in models:
         rows = _path(model, "tradeModel", "skuMap")
         props = _path(model, "offerDetail", "skuProps")
@@ -260,6 +263,7 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
             sku = Sku(sku_id, [Specification(i, f"sku{i}", part, name)
                                for i, (part, name) in enumerate(zip(parts, names), 1)])
             spec_ids.add(sku_id, row.get("specId"))
+            prices.add(sku_id, row)
             if images is not None:
                 images.add(sku, props)
             if sku_id in conflicts:
@@ -272,6 +276,8 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
                 found[sku_id] = sku
     skus, spec_warnings = spec_ids.finish(list(found.values()))
     warnings.update(spec_warnings)
+    skus, price_warnings = prices.finish(skus)
+    warnings.update(price_warnings)
     return skus, sorted(warnings)
 
 
@@ -296,6 +302,7 @@ def parse_detail(text: str, url: str) -> SkuResult:
         if trade_skus:
             result.skus = trade_skus
             result.specification_images = images.finish(trade_skus)
+            result.sizes, result.color_sizes = summarize_sizes(trade_skus)
             result.warnings = trade_warnings + ["sku_completeness_unknown"]
             if malformed_json:
                 result.warnings.append("malformed_other_candidate")
@@ -336,6 +343,8 @@ def parse_detail(text: str, url: str) -> SkuResult:
     except (DecodeLimit, RecursionError, ValueError) as exc:
         result.skus = []
         result.specification_images = []
+        result.sizes = []
+        result.color_sizes = []
         result.status = "parse_failed"
         result.reason = str(exc) if isinstance(exc, DecodeLimit) else "invalid_structure"
     return result

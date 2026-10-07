@@ -10,6 +10,7 @@ from product_sku.models import SkuResult
 
 from .config import Settings
 from .cookie_store import CookieStore, CookieStoreError
+from .sku_rate_limit import QueryStartLimiter
 
 
 class SkuServiceError(Exception):
@@ -31,6 +32,7 @@ class ProductSkuService:
         self._executor = ThreadPoolExecutor(
             max_workers=settings.sku_max_concurrency, thread_name_prefix="product-sku",
         )
+        self._start_limiter = QueryStartLimiter()
         self._jobs: set[asyncio.Task[SkuResult]] = set()
         self._closing = False
 
@@ -43,6 +45,7 @@ class ProductSkuService:
         except ValueError:
             raise _unavailable() from None
         with client:
+            self._start_limiter.wait()
             return client.fetch(url)
 
     async def _run(self, url: str) -> SkuResult:
