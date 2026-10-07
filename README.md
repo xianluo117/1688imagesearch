@@ -243,6 +243,8 @@ SKU 查询、价格口径和 v1/v2 兼容说明见 [`docs/merchant-sku-api.md`](
 API 使用 FastAPI、SQLite、2 个上传 Worker 和 2 个商品 Worker：
 
 - Cookie 加密保存在 SQLite。
+
+API Cookie 默认存储在 [data/image-search.db](data/image-search.db) 的 [cookie_versions 表](src/api/database.py)，可用 [DATABASE_PATH 配置](src/api/config.py:108)覆写；此处是默认值，不代表已确认部署实际路径。独立命令行的 Cookie 文件参数读取指定文件，浏览器下载的 Cookie JSON 是人工备份，不是 API 活动存储。备份或迁移 API 时同时保留数据库及原 [COOKIE_ENCRYPTION_KEY](src/api/config.py)，否则无法解密；不要输出或提交密钥。
 - 上传任务和商品任务独立持久化，状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。
 - 上传成功后立即保存 `image_id` 和官方搜索页 URL，不自动创建商品任务。
 - 商品任务显式引用成功的上传任务，并使用上传时绑定的 Cookie 版本。

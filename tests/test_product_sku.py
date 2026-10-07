@@ -211,7 +211,8 @@ class TradeModelTests(unittest.TestCase):
         self.assertEqual([(s.position, s.name, s.value) for s in result.skus[0].specifications],
                          [(1, "颜色", "蓝色"), (2, "尺寸", "L")])
         self.assertIsNone(result.main_image)
-        self.assertEqual(result.warnings, ["sku_completeness_unknown"])
+        # Valid ordinary SKUs without the fixed quote source must be identifiable.
+        self.assertEqual(result.warnings, ["sku_price_missing", "sku_price_source_missing", "sku_completeness_unknown"])
 
     def test_bad_mapping_is_not_guessed(self):
         for attrs in ("L" + chr(38) + "gt;蓝色", "蓝色>L", "蓝色", "绿色" + chr(38) + "gt;L"):

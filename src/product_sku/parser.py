@@ -10,6 +10,7 @@ from .specification_images import OptionImages
 from .spec_ids import SpecIds
 from .prices import SkuPrices
 from .size_summary import summarize_sizes
+from .quote_sources import collect_quotes
 
 FIELD = "pieceWeightScaleInfo"
 IDENTITY_KEYS = ("offerId", "productId", "itemId")
@@ -98,13 +99,15 @@ def _set_seller(result: SkuResult, candidates: list[dict]) -> None:
 
 
 def _arrays(roots: list[Any], product_id: str, models: list[Any] | None = None,
-            sellers: list[dict] | None = None) -> tuple[list[Any], bool]:
+            sellers: list[dict] | None = None,
+            verified_roots: list[dict] | None = None) -> tuple[list[Any], bool]:
     arrays: list[Any] = []
     unscoped = False
     nodes = 0
+    verified_count = 0
 
     def walk(value: Any, owner: str | None, depth: int) -> None:
-        nonlocal nodes, unscoped
+        nonlocal nodes, unscoped, verified_count
         nodes += 1
         if nodes > MAX_NODES or depth > MAX_DEPTH:
             raise DecodeLimit("structure_limit")
@@ -124,6 +127,14 @@ def _arrays(roots: list[Any], product_id: str, models: list[Any] | None = None,
                     if len(sellers) > MAX_CANDIDATES:
                         raise DecodeLimit("candidate_limit")
             model = _verified_model(value, product_id)
+            if model is not None:
+                verified_count += 1
+                if verified_count > MAX_CANDIDATES:
+                    raise DecodeLimit("candidate_limit")
+            if model is not None and verified_roots is not None:
+                verified_roots.append(value)
+                if len(verified_roots) > MAX_CANDIDATES:
+                    raise DecodeLimit("candidate_limit")
             if model is not None and models is not None:
                 models.append(model)
                 if len(models) > MAX_CANDIDATES:
@@ -300,24 +311,16 @@ def parse_detail(text: str, url: str) -> SkuResult:
         roots, malformed_json = json_roots(page)
         models: list[Any] = []
         sellers: list[dict] = []
-        arrays, unscoped = _arrays(roots, product_id, models, sellers)
+        verified_roots: list[dict] = []
+        arrays, unscoped = _arrays(roots, product_id, models, sellers, verified_roots)
         images = OptionImages()
-        quote_by_sku: dict[str, list[Any]] = {}
-        for root in roots:
-            if not isinstance(root, dict) or _verified_model(root, product_id) is None:
-                continue
-            quote_rows = _path(root, "result", "data", "mainPrice", "fields", "finalPriceModel",
-                               "tradeWithoutPromotion", "skuMapOriginal")
-            if isinstance(quote_rows, list):
-                for quote in quote_rows:
-                    if isinstance(quote, dict) and identifier(quote.get("skuId")):
-                        quote_by_sku.setdefault(identifier(quote["skuId"]), []).append(quote.get("price"))
-        trade_skus, trade_warnings = _trade_skus(models, product_id, images, quote_by_sku)
+        quotes = collect_quotes(verified_roots, product_id)
+        trade_skus, trade_warnings = _trade_skus(models, product_id, images, quotes.by_sku)
         if trade_skus:
             result.skus = trade_skus
             result.specification_images = images.finish(trade_skus)
             result.sizes, result.color_sizes = summarize_sizes(trade_skus)
-            result.warnings = trade_warnings + ["sku_completeness_unknown"]
+            result.warnings = sorted(set(trade_warnings + quotes.warnings_for(trade_skus))) + ["sku_completeness_unknown"]
             if malformed_json:
                 result.warnings.append("malformed_other_candidate")
             result.status, result.reason = "partial_success", "sku_data_found"
@@ -350,6 +353,7 @@ def parse_detail(text: str, url: str) -> SkuResult:
         result.main_image = page.main_image(product_id)
         if result.main_image is None:
             result.warnings.append("main_image_unavailable")
+        result.warnings = sorted(set(result.warnings + quotes.warnings_for(result.skus)))
         result.warnings.extend(["specification_names_unverified", "sku_completeness_unknown"])
         result.status, result.reason = "partial_success", "sku_data_found"
         _set_seller(result, sellers)
