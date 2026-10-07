@@ -232,17 +232,20 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 - 缺失或空白值不参加汇总；同一维度内按原始值去重，带空格的不同原始值不合并。
 - 汇总仅覆盖返回SKU，不保证平台完整尺码范围，也不代表库存、可购买数量或当前可售状态。没有有效SKU时两个列表为空数组。
 
-### 3.5 逐SKU价格及未验证限制
+### 3.5 逐SKU价格口径
 
-实现见[独立价格模块](../src/product_sku/prices.py:1)。**当前生产价格契约未启用，所有SKU的价格、币种、来源和口径均为空值。** 金额字段为正整数或与商品价数值相符，不构成单位、币种或口径证据。
+实现见[独立价格模块](../src/product_sku/prices.py:1)。生产契约已启用，但仅针对已验证的详情页价格组件路径：
 
-- 只从通过当前商品归属和SKU规格组合验证的交易行收集候选，不读取推荐商品价格、不回填商品最低价或区间价。
-- 后续仅在可靠证据确认单位、币种和报价语义并经代码审查后，才可启用内部价格契约；页面自行出现单位字段不会自动启用。
-- 有已验证契约时使用十进制精确运算，返回十进制字符串，不使用二进制浮点金额；缺失、非法、单位未知或候选冲突均为空值。
-- 当前精确金额输入仅支持正整数和普通正十进制字符串；不接受布尔值、浮点数、科学计数法、非有限值或带空白金额。
-- 同一SKU存在不同价格候选，或有效候选与缺失/非法候选并存时，不选择第一个。价格失败不删除有效SKU，不改变规格标识、规格值冲突或图片规则。
-- 当前存在未验证金额时附带 [`sku_price_unverified`](../src/product_sku/prices.py:64)；已验证契约下非法候选附带 [`invalid_sku_price`](../src/product_sku/prices.py:68)，冲突附带 [`conflicting_sku_price`](../src/product_sku/prices.py:66)。
-- 即使未来返回非空报价，也不保证是结算价；不含数量阶梯、运费、税费、优惠或最终支付金额。本接口不增加阶梯价字段。
+`result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price`
+
+该路径的每一行通过同一商品的 `skuId` 与交易模型 SKU 关联。在线验证商品898728774563时，详情价格组件标记 `skuPriceType=skuPrice`、`priceDisplayType=skuPrice`、`originPriceType=skuPrice`，单位字段为“件”，224/224 条 SKU 原始报价存在；示例 SKU 5752895764090 的原始报价为 `37.00`。该字段是国内1688详情页显示的 CNY 十进制报价，口径为**未促销原始逐SKU报价**。
+
+- 旧的 `tradeModel.skuMap[].priceAmount` 仅是数量/起订量相关整数，不作为金额，禁止除以100；商品展示价、阶梯价、促销价、单件价和最终结算价不回填到逐SKU价格。
+- 返回的 `price` 为精确十进制字符串，`currency` 为 `CNY`，`price_source` 为固定已验证路径，`price_basis` 为 `detail_html_sku_original_quote_without_promotion`。这不是最终结算价，不含数量阶梯、运费、税费、优惠或支付服务费。
+- 每条 SKU 必须以相同 `skuId` 关联价格；没有对应报价时保留 SKU 并返回空价格。报价为零、负数、布尔值、浮点数、科学计数法、空白字符串或格式非法时返回空值。
+- 同一 SKU 有多个不同报价，或有效报价与无效报价并存时返回空值并附 `conflicting_sku_price`；不会删除规格有效的 SKU。
+- 已验证报价源缺失不产生旧的 `sku_price_unverified`，因为 `priceAmount` 已明确不是金额；未验证/旧来源页面仍可返回空价格。
+- `v1` 保留原有 `skus[].price/currency/price_source/price_basis` 字段；`v2` 转换为每条 SKU 的 `price.amount/currency/status/source/basis`，v1/v2共享同一次详情查询。
 
 ## 4. 商家字段的空值与安全规则
 
@@ -334,13 +337,12 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
 
 ### 7.1 本轮尺码与价格扩展（2026-10-07）
 
-- 已完成模型、接口契约、独立尺码汇总、独立保守价格模块和接口文档；原请求、状态映射和已有字段保留，无阶梯价。
-- 全部123项离线Python回归通过，耗时1.736秒。新增14项尺码/价格用例与1项HTTP契约用例，覆盖顺序去重、真实颜色组合、缺名、多维歧义、旧来源、空结果、金额精度/单位、非法金额、候选缺失/冲突、推荐隔离、规格标识与图片兼容；已有请求、状态、限速和线程生命周期用例也通过。
-- 测试使用合成价格契约验证十进制与冲突算法，**不表示实际页面单位或报价口径已获验证**。测试仅有第三方客户端弃用提示，不影响通过结果。
-- 本轮仅一次上游详情请求，商品844515661443返回HTTP 200、1个已验证模型、24条有效SKU；24条交易金额均为正整数。检查的固定字段中，交易模型、商品详情与交易行均未发现币种、金额单位、价格缩放、价格类型或价格描述声明，项目现有代码也未提供可靠定义。因此不推断除100、不默认人民币，生产价格保持空值。
-- 此前观察到商品报价39.80与单件价格候选38.80/36.80并存，不能用数值接近或匹配证明金额口径。本轮未输出或保存完整页面、Cookie、密钥、签名或账号信息。
-- 在线诊断在本轮功能接入前执行，只验证上游结构与价格限制；本轮新尺码字段和API响应通过离线回归验证，未再发起网络请求。
-- 未运行前端构建，未部署、未重启、未提交；线上旧进程不会自动加载本轮字段。
+- 已完成模型、接口契约、独立尺码汇总、逐SKU价格源接入和异常处理；原请求、状态映射和v1字段保留，不增加阶梯价。
+- 商品844515661443在线HTTP200验证：24个交易行的 `priceAmount` 均为1，商品展示价为39.80，证明该字段不是金额，未启用除100。
+- 商品898728774563在线HTTP200验证：224个有效SKU、224条 `mainPrice...skuMapOriginal[].price` 报价，价格样例37.00；同页逐SKU模式和“件”单位证据确认价格为CNY十进制显示报价。
+- 149项离线Python回归通过，覆盖逐SKU关联、空值、零/负值、非法输入、冲突保留SKU、v1兼容和v2价格对象转换。
+- 在线输出仅记录脱敏路径、SKU样例和计数，未保存完整页面、Cookie、密钥、签名或账号信息。
+- 本轮未部署、未重启、未提交或推送；运行中的旧API进程不会自动加载本轮代码。
 
 实现参考：[查询路由](../src/api/sku.py:1)、[响应契约](../src/api/sku_schemas.py:15)、[SKU解析器](../src/product_sku/parser.py:1)、[结果模型](../src/product_sku/models.py:1)、[尺码价格测试](../tests/test_sku_sizes_prices.py:1)、[HTTP契约测试](../tests/test_sku_api.py:173)、[有界价格诊断](../src/diagnose_sku_prices.py:1)。
 
@@ -354,7 +356,7 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
 
 ### 8.2 完整合成响应
 
-以下是**合成结构示例**，不是在线查询结果。金额保持空值，符合当前生产限制；模型见[第二版响应契约](../src/api/sku_v2_schemas.py:89)。
+以下是**合成结构示例**，不是在线查询结果。真实页面若命中已验证价格源，`amount/currency/source/basis` 会非空；模型见[第二版响应契约](../src/api/sku_v2_schemas.py:89)。
 
 ```json
 {
@@ -403,13 +405,13 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
         "sku_id": "900000000000000001",
         "spec_id": "0123456789abcdef0123456789ABCDEF",
         "option_ids": ["d1_o1", "d2_o1"],
-        "price": {"amount": null, "currency": null, "status": "unavailable", "source": null, "basis": null}
+        "price": {"amount": "39.80", "currency": "CNY", "status": "available", "source": "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price", "basis": "detail_html_sku_original_quote_without_promotion"}
       },
       {
         "sku_id": "900000000000000002",
         "spec_id": "abcdef0123456789abcdef0123456789",
         "option_ids": ["d1_o1", "d2_o2"],
-        "price": {"amount": null, "currency": null, "status": "unavailable", "source": null, "basis": null}
+        "price": {"amount": "39.80", "currency": "CNY", "status": "available", "source": "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price", "basis": "detail_html_sku_original_quote_without_promotion"}
       }
     ]
   },
@@ -454,9 +456,9 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
 | [available](../src/api/sku_v2_converter.py:19) | 内部结果已有合法正十进制字符串、币种、来源和口径；原样返回，不再次换算 |
 | [unavailable](../src/api/sku_v2_converter.py:19) | 无法提供可信完整价格；金额、币种、来源和口径全部为空 |
 
-**[生产价格契约](../src/product_sku/prices.py:21)仍为未启用状态。尚未真实输出SKU价格，不除以100、不默认人民币、不用商品展示价回填。** 合法合成价格的可用状态仅由离线测试覆盖，不构成真实币种、单位或报价口径的证据。
+**[生产价格契约](../src/product_sku/prices.py:25)已启用。** 仅输出已验证详情价格组件中的逐SKU原始报价；不除以100、不使用商品展示价回填、不提供阶梯价或最终结算价。在线证据和限制见第3.5节与第7.1节。
 
-[结果级价格警告](../src/api/sku_v2_schemas.py:84)保留原有未验证、非法或冲突详情。其中[未验证警告](../src/product_sku/prices.py:63)表示返回SKU中至少一条存在未验证金额候选，**不表示每条SKU都有候选或都已确诊未验证**；缺失候选的SKU不能据此标为未验证。现有内部结果没有逐SKU诊断信息，第二版不会把全局警告盲目传播为逐条状态。
+[结果级价格警告](../src/api/sku_v2_schemas.py:84)保留非法或冲突详情；缺少已验证报价的SKU保持 `unavailable`。第二版不会把结果级警告盲目传播为逐条状态。
 
 ### 8.5 HTTP与错误契约
 
@@ -473,6 +475,7 @@ HTTP状态映射以[路由实现](../src/api/sku.py:53)为准。
 
 ### 8.6 本轮完成记录（2026-10-07）
 
-- 已完成[独立模型](../src/api/sku_v2_schemas.py:1)、[纯转换](../src/api/sku_v2_converter.py:1)、[第二版路由](../src/api/sku_v2.py:1)、[共享HTTP策略](../src/api/sku_http.py:1)与[应用接入](../src/api/app.py:119)。未修改第一版模型、解析器或价格生产契约。
-- 全部147项离线Python测试通过，耗时2.622秒。新增24项：独立[接口测试9项](../tests/test_sku_api_v2.py:16)、[转换测试15项](../tests/test_sku_v2_converter.py:23)。覆盖第一版响应不变、鉴权/输入/业务状态/异常、一次查询、共享服务/并发/启动间隔/等待超时、去重引用、准确汇总、三维歧义、旧来源空值、图片身份和价格限制。
-- 本轮没有重新抓取上游，没有部署、重启、提交或推送，没有在线验证第二版路径。既有运行进程不会自动加载新增路由；历史在线记录不代表第二版已在线可用。
+- 已完成[独立模型](../src/api/sku_v2_schemas.py:1)、[纯转换](../src/api/sku_v2_converter.py:1)、[第二版路由](../src/api/sku_v2.py:1)、[共享HTTP策略](../src/api/sku_http.py:1)与[应用接入](../src/api/app.py:119)。第一版字段和请求兼容保留。
+- 149项离线Python测试通过；覆盖价格源关联、精确十进制、异常/冲突保留SKU、v1字段和v2价格对象。
+- 真实详情解析商品898728774563返回HTTP 200、224条SKU；v1转换224/224条有非空 `price/currency/price_basis`，v2转换224/224条为 `available`。脱敏样例为 `amount=37.00`、`currency=CNY`、`basis=detail_html_sku_original_quote_without_promotion`。v1/v2使用同一内存结果，未为v2重复查询上游。
+- 本轮没有部署、重启、提交或推送；既有运行进程不会自动加载新增代码。

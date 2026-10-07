@@ -212,7 +212,8 @@ def _rows(arrays: list[Any]) -> tuple[list[Sku], list[str], bool]:
     return list(found.values()), sorted(warnings), malformed
 
 
-def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None = None) -> tuple[list[Sku], list[str]]:
+def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None = None,
+                quote_by_sku: dict[str, list[Any]] | None = None) -> tuple[list[Sku], list[str]]:
     found: dict[str, Sku] = {}
     conflicts: set[str] = set()
     warnings: set[str] = set()
@@ -220,6 +221,7 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
     delimiter = chr(38) + "gt;"
     spec_ids = SpecIds()
     prices = SkuPrices()
+    quote_by_sku = quote_by_sku or {}
     for model in models:
         rows = _path(model, "tradeModel", "skuMap")
         props = _path(model, "offerDetail", "skuProps")
@@ -264,6 +266,8 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
                                for i, (part, name) in enumerate(zip(parts, names), 1)])
             spec_ids.add(sku_id, row.get("specId"))
             prices.add(sku_id, row)
+            for quote in quote_by_sku.get(sku_id, []):
+                prices.add_quote(sku_id, quote)
             if images is not None:
                 images.add(sku, props)
             if sku_id in conflicts:
@@ -298,7 +302,17 @@ def parse_detail(text: str, url: str) -> SkuResult:
         sellers: list[dict] = []
         arrays, unscoped = _arrays(roots, product_id, models, sellers)
         images = OptionImages()
-        trade_skus, trade_warnings = _trade_skus(models, product_id, images)
+        quote_by_sku: dict[str, list[Any]] = {}
+        for root in roots:
+            if not isinstance(root, dict) or _verified_model(root, product_id) is None:
+                continue
+            quote_rows = _path(root, "result", "data", "mainPrice", "fields", "finalPriceModel",
+                               "tradeWithoutPromotion", "skuMapOriginal")
+            if isinstance(quote_rows, list):
+                for quote in quote_rows:
+                    if isinstance(quote, dict) and identifier(quote.get("skuId")):
+                        quote_by_sku.setdefault(identifier(quote["skuId"]), []).append(quote.get("price"))
+        trade_skus, trade_warnings = _trade_skus(models, product_id, images, quote_by_sku)
         if trade_skus:
             result.skus = trade_skus
             result.specification_images = images.finish(trade_skus)

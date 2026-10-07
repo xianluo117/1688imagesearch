@@ -19,12 +19,21 @@
 - Linux 或其他可运行 Python 的系统
 - 有效的 1688 登录 Cookie
 
-安装依赖：
+安装依赖（直接使用系统 Python，不创建或激活 venv）：
+
+Linux/macOS：
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
 python3 -m pip install -r requirements.txt
+```
+
+Windows PowerShell（强制 UTF-8）：
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+python -m pip install -r requirements.txt
 ```
 
 宝塔 Python 项目的依赖安装器会逐行执行包名，可能把版本范围中的 `<` 误解析为 Shell 重定向。宝塔面板的“安装依赖包”应选择：
@@ -225,6 +234,8 @@ md5(token + "&" + timestamp_ms + "&" + appKey + "&" + data_json)
 
 ## 11. API 服务
 
+SKU 查询、价格口径和 v1/v2 兼容说明见 [`docs/merchant-sku-api.md`](docs/merchant-sku-api.md)。请求必须提交 `product_url`；价格只在详情页有已验证逐 SKU 原始报价时返回，不回填商品价，不提供阶梯价或最终结算价。
+
 查询接口的完整调用文档见 [`docs/search-api.md`](docs/search-api.md)。
 
 ### 11.1 架构
@@ -258,7 +269,7 @@ python3 src/init_env.py
 
 `.env` 已加入 `.gitignore`，不会提交到 Git。配置模板见 `.env.example`。
 
-查看生成的密钥：
+查看生成的密钥（仅管理员本机执行）：
 
 ```bash
 cat .env
@@ -266,10 +277,11 @@ cat .env
 
 注意：
 
-- `COOKIE_UPLOAD_API_KEY` 和 `SEARCH_API_KEY` 必须不同。
-- `COOKIE_ENCRYPTION_KEY` 不得配置到油猴或查询调用方。
-- 不要随意修改 `COOKIE_ENCRYPTION_KEY`，否则已有数据库中的 Cookie 无法解密。
-- 初始化工具默认不覆盖已有 `.env`。确认要重新生成全部密钥时使用 `python3 src/init_env.py --force`。
+- `COOKIE_UPLOAD_API_KEY` 和 `SEARCH_API_KEY` 必须不同；商品查询使用 `SEARCH_API_KEY`，不是 `COOKIE_UPLOAD_API_KEY`。
+- `COOKIE_ENCRYPTION_KEY` 不得配置到油猴或查询调用方，必须保留，否则已有数据库中的 Cookie 无法解密。
+- `python3 src/init_env.py` / `python src/init_env.py` 在已有 `.env` 时不会覆盖；不建议使用 `--force`。只有确认要重建全部密钥、并已停止依赖旧密钥的服务时才使用该选项。
+- `.env` 由程序自动加载，不会自动 export 到当前 Shell。`curl` 示例中的 `$SEARCH_API_KEY` 只有在 Shell 已手工设置该环境变量时才会展开；也可直接从安全配置注入，不要把密钥写进命令历史或 URL。
+- API 服务更新代码后要停止旧进程再启动一次；不要在同一端口重复启动。
 
 API 启动时会自动加载项目根目录 `.env`。系统环境变量优先级高于 `.env`，生产环境也可以通过 systemd、Docker 或 Shell 注入配置。
 
@@ -293,10 +305,25 @@ API 启动时会自动加载项目根目录 `.env`。系统环境变量优先级
 
 ### 11.3 启动
 
+Linux/macOS：
+
 ```bash
 python3 src/init_env.py
 PYTHONPATH=src python3 src/run_api.py
 ```
+
+Windows PowerShell（强制 UTF-8）：
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+python src/init_env.py
+$env:PYTHONPATH = "src"
+python src/run_api.py
+```
+
+`run_api.py` 读取 `.env` 中的 `API_HOST` 和 `API_PORT`，默认监听 `127.0.0.1:8000`；当前实现固定单个 Uvicorn worker。端口实际以 `.env` 为准。
 
 基础存活检查：
 

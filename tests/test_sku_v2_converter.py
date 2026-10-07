@@ -118,7 +118,8 @@ class ConverterV2Tests(unittest.TestCase):
         self.assertEqual(payload.data.size_summary.by_color[0].size_option_ids, ["d2_o1", "d2_o2"])
 
     def test_price_null_and_global_warning_not_per_sku_diagnosis(self):
-        self.assertIsNone(VERIFIED_CONTRACT)
+        self.assertEqual(VERIFIED_CONTRACT.currency, "CNY")
+        self.assertEqual(VERIFIED_CONTRACT.basis, "detail_html_sku_original_quote_without_promotion")
         original = result([row("1"), row("2")])
         original.warnings = ["sku_price_unverified", "invalid_sku_price", "conflicting_sku_price"]
         payload = convert_result(original)

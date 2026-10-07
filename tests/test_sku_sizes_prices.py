@@ -94,16 +94,38 @@ class PriceTests(unittest.TestCase):
             if len(set(amounts)) > 1:
                 self.assertIn("conflicting_sku_price", warnings)
 
-    def test_unknown_production_contract_no_product_fallback(self):
+    def test_verified_detail_quote_is_used_by_sku_id(self):
         value, model = trade_page()
-        model["tradeModel"].update(currency="CNY", priceUnit="cent", minPrice="39.80")
+        sku_id = model["tradeModel"]["skuMap"][0]["skuId"]
+        value["result"]["data"] = {"mainPrice": {"fields": {"finalPriceModel": {
+            "tradeWithoutPromotion": {"skuMapOriginal": [{"skuId": sku_id, "price": "39.80"}]}
+        }}}}
+        result = parse_detail(page(value), URL)
+        self.assertEqual(result.skus[0].price, "39.80")
+        self.assertEqual(result.skus[0].currency, "CNY")
+        self.assertIn("skuMapOriginal", result.skus[0].price_source)
+        self.assertEqual(result.skus[0].price_basis, "detail_html_sku_original_quote_without_promotion")
+
+    def test_price_amount_is_not_used_as_production_money(self):
+        value, model = trade_page()
         model["tradeModel"]["skuMap"][0]["priceAmount"] = 3980
         result = parse_detail(page(value), URL)
         self.assertIsNone(result.skus[0].price)
-        self.assertIsNone(result.skus[0].currency)
-        self.assertIsNone(result.skus[0].price_source)
-        self.assertIsNone(result.skus[0].price_basis)
-        self.assertIn("sku_price_unverified", result.warnings)
+        self.assertNotIn("sku_price_unverified", result.warnings)
+
+    def test_verified_quote_invalid_and_conflicting_keep_sku(self):
+        value, model = trade_page()
+        sku_id = model["tradeModel"]["skuMap"][0]["skuId"]
+        value["result"]["data"] = {"mainPrice": {"fields": {"finalPriceModel": {
+            "tradeWithoutPromotion": {"skuMapOriginal": [
+                {"skuId": sku_id, "price": "0"},
+                {"skuId": sku_id, "price": "40.00"},
+            ]}
+        }}}}
+        result = parse_detail(page(value), URL)
+        self.assertEqual(len(result.skus), 1)
+        self.assertIsNone(result.skus[0].price)
+        self.assertIn("conflicting_sku_price", result.warnings)
 
     def test_validated_row_scope_and_recommendation_isolation(self):
         value, model = trade_page()
