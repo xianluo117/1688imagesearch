@@ -132,11 +132,27 @@ class ConverterV2Tests(unittest.TestCase):
         price = convert_result(result([synthetic])).data.skus[0].price
         self.assertEqual(price.status, "available")
         self.assertEqual(price.amount, "39.80")
-        for changes in ({"price": "0"}, {"price": "NaN"}, {"price": "-1"}, {"price": "1e2"}, {"currency": None}, {"price_source": None}, {"price_basis": None}):
+        for changes in ({"price": "0"}, {"price": "NaN"}, {"price": "-1"}, {"price": "1e2"}):
             price = convert_result(result([replace(synthetic, **changes)])).data.skus[0].price
             self.assertEqual(price.status, "unavailable")
             self.assertIsNone(price.amount)
             self.assertIsNone(price.currency)
+
+    def test_price_availability_ignores_metadata(self):
+        for metadata in (
+            {},
+            {"currency": "CNY"},
+            {"currency": "", "price_source": "", "price_basis": ""},
+            {"currency": "CNY", "price_source": "discount", "price_basis": "detail_html_sku_discount_quote"},
+            {"currency": "CNY", "price_source": "original", "price_basis": "detail_html_sku_original_quote_without_promotion"},
+        ):
+            with self.subTest(metadata=metadata):
+                sku = replace(row("1"), price="28.00", **metadata)
+                price = convert_result(result([sku])).data.skus[0].price
+                self.assertEqual(price.amount, "28.00")
+                self.assertEqual(price.status, "available")
+                self.assertEqual(set(price.model_dump()), {"amount", "currency", "status", "source", "basis"})
+                self.assertEqual(sku.price, "28.00")  # v1's direct amount stays unchanged.
 
     def test_empty_result_and_seller_spec_ids(self):
         original = result([])

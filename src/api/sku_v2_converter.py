@@ -17,15 +17,12 @@ def _identity(spec: Specification) -> tuple:
 
 
 def _price(sku: Sku) -> PriceV2:
-    # Only already validated internal prices are exposed. Global warnings cannot
-    # distinguish missing, invalid, conflicting and unverified individual SKUs.
+    # Availability depends only on a positive decimal amount. Metadata is kept
+    # for response compatibility, never used to reject an original/discount quote.
     available = (
         isinstance(sku.price, str)
         and re.fullmatch(r"[0-9]{1,40}(?:\.[0-9]{1,24})?", sku.price) is not None
         and Decimal(sku.price) > 0
-        and isinstance(sku.currency, str)
-        and re.fullmatch(r"[A-Z]{3}", sku.currency) is not None
-        and bool(sku.price_source) and bool(sku.price_basis)
     )
     return PriceV2(
         amount=sku.price if available else None,
