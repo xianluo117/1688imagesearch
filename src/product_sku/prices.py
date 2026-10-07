@@ -8,6 +8,8 @@ from .models import Sku
 
 SOURCE = "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price"
 BASIS = "detail_html_sku_original_quote_without_promotion"
+DISCOUNT_SOURCE = "result.global.globalData.model.tradeModel.skuMap[].discountPrice"
+DISCOUNT_BASIS = "detail_html_sku_discount_quote"
 
 
 @dataclass(frozen=True)
@@ -51,8 +53,10 @@ class SkuPrices:
         self.contract = contract
         self.candidates: dict[str, set[str | None]] = {}
         self.quote_candidates: dict[str, set[str | None]] = {}
+        self.discount_candidates: dict[str, set[str | None]] = {}
         self.present: set[str] = set()
         self.quote_present: set[str] = set()
+        self.discount_present: set[str] = set()
         self.legacy_enabled = contract is not VERIFIED_CONTRACT
 
     def add(self, sku_id: str, row: dict) -> None:
@@ -69,22 +73,37 @@ class SkuPrices:
         value = decimal_price(raw, self.contract)
         self.quote_candidates.setdefault(sku_id, set()).add(value)
 
+    def add_discount_quote(self, sku_id: str, raw: Any) -> None:
+        if raw is not None:
+            self.discount_present.add(sku_id)
+        value = decimal_price(raw, self.contract)
+        self.discount_candidates.setdefault(sku_id, set()).add(value)
+
     def finish(self, skus: list[Sku]) -> tuple[list[Sku], list[str]]:
         result = []
         warnings = set()
         for sku in skus:
-            values = self.quote_candidates.get(sku.sku_id, {None})
-            if self.legacy_enabled and sku.sku_id not in self.quote_candidates:
+            values = self.quote_candidates.get(sku.sku_id, set())
+            discount_values = self.discount_candidates.get(sku.sku_id, set())
+            source, basis = SOURCE, self.contract.basis if self.contract else None
+            if len(values) == 1 and next(iter(values)) is not None:
+                price = next(iter(values))
+            else:
+                discount_values = self.discount_candidates.get(sku.sku_id, set())
+                price = next(iter(discount_values)) if len(discount_values) == 1 else None
+                if price is not None:
+                    source, basis = DISCOUNT_SOURCE, DISCOUNT_BASIS
+            if price is None and self.legacy_enabled and sku.sku_id not in self.quote_candidates:
                 values = self.candidates.get(sku.sku_id, {None})
-            price = next(iter(values)) if len(values) == 1 else None
-            if len(values) > 1:
+                price = next(iter(values)) if len(values) == 1 else None
+            if (len(values) > 1 or len(discount_values) > 1) and price is None:
                 warnings.add("conflicting_sku_price")
-            elif price is None and sku.sku_id in self.quote_present:
+            elif price is None and (sku.sku_id in self.quote_present or sku.sku_id in self.discount_present):
                 warnings.add("invalid_sku_price")
             elif price is None and self.legacy_enabled and sku.sku_id in self.present:
                 warnings.add("invalid_sku_price")
             result.append(replace(sku, price=price,
                                   currency=self.contract.currency if price is not None else None,
-                                  price_source=SOURCE if price is not None else None,
-                                  price_basis=self.contract.basis if price is not None else None))
+                                  price_source=source if price is not None else None,
+                                  price_basis=basis if price is not None else None))
         return result, sorted(warnings)

@@ -23,7 +23,7 @@ class Assets(HTMLParser):
             self.urls.append(url)
 
 
-def inspect(text, url, product_id, emit):
+def inspect(text, url, product_id, emit, *, samples=False):
     """Report fixed-path types/counts only, using production ownership rules."""
     roots, malformed = json_roots(Page(text))
     models, verified_roots = [], []
@@ -41,6 +41,9 @@ def inspect(text, url, product_id, emit):
          valid_rows=quotes.valid_rows, amount_types=quotes.amount_types,
          matched=len(ids.intersection(quotes.by_sku)),
          unmatched=len(set(quotes.by_sku).difference(ids)))
+    from .price_evidence import inspect_fixed
+    for root in verified_roots:
+        inspect_fixed(root, product_id, ids, emit, samples)
     emit("parsed", sku_count=len(result.skus), prices=sum(s.price is not None for s in result.skus),
          warnings=result.warnings)
     return result

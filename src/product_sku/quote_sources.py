@@ -20,7 +20,7 @@ class QuoteSources:
     def warnings_for(self, skus) -> list[str]:
         warnings = set(self.warnings)
         ids = {sku.sku_id for sku in skus}
-        if ids and self.containers == 0:
+        if ids and self.containers == 0 and any(sku.price is None for sku in skus):
             warnings.add("sku_price_source_missing")
         if ids and self.by_sku and not ids.intersection(self.by_sku):
             warnings.add("sku_price_unmatched")

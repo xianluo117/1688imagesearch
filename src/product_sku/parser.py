@@ -277,6 +277,7 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
                                for i, (part, name) in enumerate(zip(parts, names), 1)])
             spec_ids.add(sku_id, row.get("specId"))
             prices.add(sku_id, row)
+            prices.add_discount_quote(sku_id, row.get("discountPrice"))
             for quote in quote_by_sku.get(sku_id, []):
                 prices.add_quote(sku_id, quote)
             if images is not None:
