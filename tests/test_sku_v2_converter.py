@@ -131,7 +131,7 @@ class ConverterV2Tests(unittest.TestCase):
         synthetic = replace(row("1"), price="39.80", currency="CNY", price_source="synthetic", price_basis="test_only")
         price = convert_result(result([synthetic])).data.skus[0].price
         self.assertEqual(price.status, "available")
-        self.assertEqual(price.amount, "39.80")
+        self.assertEqual(price.amount, "40")
         for changes in ({"price": "0"}, {"price": "NaN"}, {"price": "-1"}, {"price": "1e2"}):
             price = convert_result(result([replace(synthetic, **changes)])).data.skus[0].price
             self.assertEqual(price.status, "unavailable")
@@ -149,10 +149,10 @@ class ConverterV2Tests(unittest.TestCase):
             with self.subTest(metadata=metadata):
                 sku = replace(row("1"), price="28.00", **metadata)
                 price = convert_result(result([sku])).data.skus[0].price
-                self.assertEqual(price.amount, "28.00")
+                self.assertEqual(price.amount, "28")
                 self.assertEqual(price.status, "available")
                 self.assertEqual(set(price.model_dump()), {"amount", "currency", "status", "source", "basis"})
-                self.assertEqual(sku.price, "28.00")  # v1's direct amount stays unchanged.
+                self.assertEqual(sku.price, "28.00")  # Internal exact amount stays unchanged.
 
     def test_empty_result_and_seller_spec_ids(self):
         original = result([])

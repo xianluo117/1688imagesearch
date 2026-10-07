@@ -41,7 +41,9 @@ class DiscountPriorityTests(unittest.TestCase):
         self.assertEqual(len(ProductSkuResponse(**result.to_dict()).skus), 54)
         converted = convert_result(result)
         self.assertEqual({s.price.status for s in converted.data.skus}, {"available"})
-        self.assertEqual({s.price.amount for s in converted.data.skus}, {"28.00"})
+        self.assertEqual({s.price.amount for s in converted.data.skus}, {"28"})
+        self.assertEqual({s["price"] for s in ProductSkuResponse(
+            **result.to_dict()).model_dump(mode="json")["skus"]}, {"28"})
         original = next(f for e, f in events if e == "fixed_quote_container"
                         and f["path"].endswith("tradeWithoutPromotion.skuMapOriginal"))
         self.assertEqual(original["fields"]["price"]["missing"], 54)

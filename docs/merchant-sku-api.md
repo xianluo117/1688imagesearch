@@ -117,7 +117,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
     {
       "sku_id": "900000000000000001",
       "spec_id": "0123456789abcdef0123456789ABCDEF",
-      "price": "39.80",
+      "price": "40",
       "currency": "CNY",
       "price_source": "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price",
       "price_basis": "detail_html_sku_original_quote_without_promotion",
@@ -145,7 +145,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 }
 ```
 
-示例第一条SKU具有合成可信报价，第二条缺少报价但保留SKU；[`price`](../src/product_sku/models.py:21) 及对应币种、来源、口径均为空，不回填第一条价格。
+示例第一条SKU的合成内部报价为39.80，HTTP展示为字符串“40”；第二条缺少报价但保留SKU，其 [`price`](../src/product_sku/models.py:21) 及对应币种、来源、口径均为空，不回填第一条价格。
 
 ### 3.1 顶层字段
 
@@ -174,7 +174,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 | [`sku_id`](../src/product_sku/models.py:16) | 字符串 | 实际SKU ID，不根据选项组合生成，继续保留 |
 | [`spec_id`](../src/product_sku/models.py:18) | 字符串或空值 | 同一交易行的上游规格标识，原样返回并保留大小写；不是SKU ID |
 | [`specifications`](../src/product_sku/models.py:17) | 数组 | 该SKU的规格项 |
-| [`price`](../src/product_sku/models.py:21) | 十进制字符串或空值 | 已验证来源的未促销原始SKU报价，非商品最低价、非结算价；缺失或不可信时为空，见第3.5节 |
+| [`price`](../src/product_sku/models.py:21) | 无小数点整数字符串或空值 | 所选原始或同SKU折扣报价向上取整后的HTTP展示金额，不是精确原报价、商品最低价或结算价；缺失或不可信时为空，见第3.5节 |
 | [`currency`](../src/product_sku/models.py:22) | 字符串或空值 | 当前可信报价契约为CNY；价格为空时币种为空，不为无报价SKU默认补币种 |
 | [`price_source`](../src/product_sku/models.py:23) | 字符串或空值 | 非空价格的已验证来源路径；价格为空时也为空 |
 | [`price_basis`](../src/product_sku/models.py:24) | 字符串或空值 | 非空价格的已验证报价口径；价格为空时也为空，不将促销价和其他口径混用 |
@@ -260,7 +260,9 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 历史在线验证商品898728774563时，详情价格组件标记逐SKU原价模式，单位字段为“件”，224/224条SKU原始报价存在；示例SKU 5752895764090的原始报价为37.00。该字段是国内1688详情页显示的CNY十进制报价，口径为**未促销原始逐SKU报价**；本轮未重复验证。
 
 - [`tradeModel.skuMap[].priceAmount`](../src/product_sku/prices.py:62) 不作为生产金额，禁止除以100；商品展示最低价、阶梯价及最终结算价不回填。折扣价仅从已验证的同SKU行读取，不按商品最低价推断。
-- 返回的 [`price`](../src/product_sku/models.py:21) 为精确十进制字符串，[`currency`](../src/product_sku/models.py:22) 为CNY，[`price_source`](../src/product_sku/models.py:23) 为固定已验证路径，[`price_basis`](../src/product_sku/models.py:24) 为 [detail_html_sku_original_quote_without_promotion](../src/product_sku/prices.py:10)。不再次缩放或补齐小数位；这不是最终结算价，不含数量阶梯、运费、税费、优惠或支付服务费。
+- 两版HTTP金额统一为**向上取整后的无小数点整数字符串**：第一版 [`price`](../src/product_sku/models.py:21)，第二版 [`amount`](../src/api/sku_v2_schemas.py:53)。40.00及40输出字符串“40”；39.01、39.80及39.999输出字符串“40”；正数小于1输出字符串“1”。不是JSON数字，不输出科学计数法；空值仍为JSON空值，不改成0或字符串“null”。
+- [共享金额展示函数](../src/api/sku_price_presentation.py:6)仅用于两版HTTP响应，以精确十进制向上取整，不经过浮点数、不除以100、不补小数位。[内部SKU金额](../src/product_sku/models.py:21)、[原始结果导出](../src/product_sku/models.py:75)、独立CLI及图搜保持原精确金额，不应用此展示规则。先完成原价校验、精确冲突判定及原价/折扣价选择，再处理HTTP展示；同来源39.01与39.80仍冲突，不能因都展示为“40”而合并。
+- [`currency`](../src/product_sku/models.py:22)及 [`price_source`](../src/product_sku/models.py:23)、[`price_basis`](../src/product_sku/models.py:24)继续记录所选报价的币种、来源和口径，不因取整改变含义；原价口径为 [detail_html_sku_original_quote_without_promotion](../src/product_sku/prices.py:10)，折扣价保留对应折扣口径。HTTP金额不是精确原报价或最终结算价，不额外计算数量阶梯、运费、税费、优惠或支付服务费。
 - [输入校验](../src/product_sku/prices.py:28)接受正整数或无符号十进制字符串：整数部分1～40位，小数部分如有则1～12位。零（包括字符串0.00）、负数、布尔值、二进制浮点数、科学计数法、空白、正号或其他非法格式均返回空值。没有对应报价时也保留SKU并返回空价格及空币种、来源、口径，不把空值改成0或字符串“null”。
 - [候选合并](../src/product_sku/prices.py:82)按来源去重；同一来源多个不同报价或有效与无效/空候选并存时，该来源不可用，按优先级尝试下一来源。均不可用才置空并告警。不同小数表示不归一；重复相同报价不冲突，不删除规格有效的SKU。
 - 仅有无效非空候选时可附 [invalid_sku_price](../src/product_sku/prices.py:82)；单纯缺失或空候选不附该警告，但会附下面的缺价提示。缺少已验证报价不会产生旧的sku_price_unverified；旧来源页面也可返回空价格。
@@ -500,7 +502,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
         "sku_id": "900000000000000001",
         "spec_id": "0123456789abcdef0123456789ABCDEF",
         "option_ids": ["d1_o1", "d2_o1"],
-        "price": {"amount": "39.80", "currency": "CNY", "status": "available", "source": "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price", "basis": "detail_html_sku_original_quote_without_promotion"}
+        "price": {"amount": "40", "currency": "CNY", "status": "available", "source": "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price", "basis": "detail_html_sku_original_quote_without_promotion"}
       },
       {
         "sku_id": "900000000000000002",
@@ -534,7 +536,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 | [`data.size_summary.dimensions`](../src/api/sku_v2_schemas.py:48) | 尺码维度对象数组；[`dimension_id`](../src/api/sku_v2_schemas.py:33)、[`name`](../src/api/sku_v2_schemas.py:34) 字符串，[`values`](../src/api/sku_v2_schemas.py:35)、[`option_ids`](../src/api/sku_v2_schemas.py:36) 为一一对应的字符串数组 |
 | [`data.size_summary.by_color`](../src/api/sku_v2_schemas.py:49) | 颜色尺码关联对象数组；[`color_option_id`](../src/api/sku_v2_schemas.py:40)、[`color`](../src/api/sku_v2_schemas.py:41)、[`size_dimension_id`](../src/api/sku_v2_schemas.py:42) 为字符串，[`sizes`](../src/api/sku_v2_schemas.py:43)、[`size_option_ids`](../src/api/sku_v2_schemas.py:44) 为一一对应的字符串数组 |
 | [`data.skus`](../src/api/sku_v2_schemas.py:72) | SKU对象数组；[`sku_id`](../src/api/sku_v2_schemas.py:61) 字符串，[`spec_id`](../src/api/sku_v2_schemas.py:62) 字符串或空值，[`option_ids`](../src/api/sku_v2_schemas.py:63) 为全部规格选项引用的字符串数组，[`price`](../src/api/sku_v2_schemas.py:64) 为固定对象 |
-| [`data.skus[].price`](../src/api/sku_v2_schemas.py:52) | 对象；[`amount`](../src/api/sku_v2_schemas.py:53)、[`currency`](../src/api/sku_v2_schemas.py:54)、[`source`](../src/api/sku_v2_schemas.py:56)、[`basis`](../src/api/sku_v2_schemas.py:57) 为字符串或空值，[`status`](../src/api/sku_v2_schemas.py:55) 为available或unavailable |
+| [`data.skus[].price`](../src/api/sku_v2_schemas.py:52) | 对象；[`amount`](../src/api/sku_v2_schemas.py:53) 为向上取整后的无小数点整数字符串或空值；[`currency`](../src/api/sku_v2_schemas.py:54)、[`source`](../src/api/sku_v2_schemas.py:56)、[`basis`](../src/api/sku_v2_schemas.py:57) 为字符串或空值，[`status`](../src/api/sku_v2_schemas.py:55) 为available或unavailable |
 | [`meta`](../src/api/sku_v2_schemas.py:75) | 固定诊断对象；[`schema_version`](../src/api/sku_v2_schemas.py:76) 固定字符串“2”，[`source`](../src/api/sku_v2_schemas.py:77) 固定detail_html，[`sku_count`](../src/api/sku_v2_schemas.py:78) 为整数，[`completeness`](../src/api/sku_v2_schemas.py:79) 为unknown、complete或partial，[`reason`](../src/api/sku_v2_schemas.py:80) 字符串，[`warnings`](../src/api/sku_v2_schemas.py:81) 字符串数组；当前解析器完整性为unknown |
 
 - [维度和选项标识](../src/api/sku_v2_schemas.py:24)仅用于**本响应内部关联**，不是上游ID，不保证跨响应稳定；不得替代[SKU ID或上游规格标识](../src/api/sku_v2_schemas.py:61)。选项按维度和原始值去重，只包含最终SKU用到的选项；不同维度的同文本不会合并。
@@ -565,26 +567,26 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 | 状态 | 含义 |
 |---|---|
-| [available](../src/api/sku_v2_converter.py:19) | 金额是合法正十进制字符串即为可用；不要求币种、来源或口径齐全，不要求必须为原价 |
+| [available](../src/api/sku_v2_converter.py:20) | 内部金额通过完整正十进制校验后可用，HTTP金额再向上取整为整数字符串；不要求币种、来源或口径齐全，不要求必须为原价 |
 | [unavailable](../src/api/sku_v2_converter.py:19) | 无法提供可信完整价格；金额、币种、来源和口径全部为空 |
 
 **[生产价格优先级](../src/product_sku/prices.py:82)已启用。** 原始SKU报价优先，其次同SKU折扣报价；不除以100、不使用商品展示价回填、不提供阶梯价或最终结算价。在线证据和限制见第3.5、3.7节。
 
 [结果级价格警告](../src/api/sku_v2_schemas.py:81)可保留非法或冲突提示，但不包含逐SKU原因映射；缺少已验证报价的SKU保持 [unavailable](../src/api/sku_v2_converter.py:33)。第二版不会把结果级警告盲目传播为逐条状态，也不新增逐条错误码。
 
-**顶层 [业务状态](../src/api/sku_v2_schemas.py:85) 不等于 [价格状态](../src/api/sku_v2_schemas.py:55)。** 部分成功仍可含可用价格。调用方只需读取逐SKU的有效金额，不应以币种、来源、口径缺失或不是原价拒绝金额。国内1688本接口按人民币使用，原价和活动价均可用；金额按十进制字符串处理，不可用不是零价。
+**顶层 [业务状态](../src/api/sku_v2_schemas.py:85) 不等于 [价格状态](../src/api/sku_v2_schemas.py:55)。** 部分成功仍可含可用价格。调用方只需读取逐SKU的有效金额，不应以币种、来源、口径缺失或不是原价拒绝金额。国内1688本接口按人民币使用，原价和活动价均可用；HTTP金额按向上取整后的整数字符串处理，不当作精确原报价，不可用不是零价。
 
 可复制的合成价格对象片段，与第8.2节两条SKU一致：
 
 ```json
-{"amount":"39.80","currency":"CNY","status":"available","source":"result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price","basis":"detail_html_sku_original_quote_without_promotion"}
+{"amount":"40","currency":"CNY","status":"available","source":"result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.skuMapOriginal[].price","basis":"detail_html_sku_original_quote_without_promotion"}
 ```
 
 ```json
 {"amount":null,"currency":null,"status":"unavailable","source":null,"basis":null}
 ```
 
-第二版[转换校验](../src/api/sku_v2_converter.py:19)只校验金额为正十进制字符串，币种、来源、口径仅保留响应兼容，不影响金额可用性，也不要求必须是原价。不重新查询商品，源输入零值与格式限制以第3.5节为准。第一版直接返回内部金额，同样不依赖这些附加字段。
+第二版[转换校验](../src/api/sku_v2_converter.py:20)先完整校验内部金额为正十进制字符串，再调用[共享展示函数](../src/api/sku_price_presentation.py:6)向上取整；非法或非正金额仍不可用，不会先取整使其通过校验。币种、来源、口径仅保留响应兼容，不影响金额可用性，也不要求必须是原价。不重新查询商品，源输入零值与格式限制以第3.5节为准。第一版在[响应序列化边界](../src/api/sku_schemas.py:37)使用同一展示函数，不修改内部SKU金额，同样不依赖这些附加字段；既有非法内部值处理不变。
 
 2026-10-07 用户确认：保持两版现有响应形状，取消附加价格字段作为可用条件。[回归](../tests/test_sku_v2_converter.py:141)覆盖无元数据、空元数据、原价及活动价金额均可用；非法及非正金额仍不可用。
 
@@ -628,6 +630,14 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 - [ ] 部署更新、重启既有API并验证部署站点第二版路径、响应编码与报价字段；历史离线及独立客户端记录不能代替部署验证。
 - 本轮仅文档编辑，没有测试、网络查询、部署、重启、提交或推送；既有运行进程不会自动加载新增代码。
 
+### 两版HTTP金额向上取整完成记录（2026-10-07）
+
+- [x] [共享展示函数](../src/api/sku_price_presentation.py:6)：精确十进制向上取整，无小数点整数字符串，支持40位整数及12位小数和进位，不使用浮点数。
+- [x] [第一版响应序列化](../src/api/sku_schemas.py:37)与[第二版校验后展示](../src/api/sku_v2_converter.py:20)接入；内部精确金额、CLI、图搜、原始结果、价源优先级及精确冲突校验不变。近期价源和折扣回退实现保留。
+- [x] 系统Python相关离线回归145项通过，新增8项测试方法；[展示与隔离测试](../tests/test_sku_price_presentation.py:29)及[两版HTTP测试](../tests/test_sku_api_v2.py:149)覆盖整数、小数、小于1、大数精度、空值、既有非法处理、字段兼容与39.01/39.80冲突仍为空。
+- [x] 更新两版字段、价格状态及合成示例；历史诊断中的37.00、28.00等仍表示当时内部精确报价，不代表当前HTTP输出格式。
+- [ ] 部署更新后人工重启现有API并验证实际响应。本轮未使用虚拟环境、未联网、未启动或重启服务、未提交或推送；145项为本轮相关离线回归数，不是全项目测试总数。
+
 ### 8.7 第一版到第二版迁移映射
 
 请求体及请求头不变，切换接口路径并按下表调整读取。标识仍按字符串保存，空值仍保留；第二版局部选项标识不能替代上游SKU或规格标识。
@@ -641,7 +651,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 | 顶层 [`specification_images`](../src/api/sku_schemas.py:31) | [`data.specifications[].options[].image_url`](../src/api/sku_v2_schemas.py:21) | 不再有独立图片列表；同一选项共享URL |
 | 顶层 [`sizes`](../src/api/sku_schemas.py:32) | [`data.size_summary.dimensions`](../src/api/sku_v2_schemas.py:48) | 按维度读取原值及选项引用 |
 | 顶层 [`color_sizes`](../src/api/sku_schemas.py:33) | [`data.size_summary.by_color`](../src/api/sku_v2_schemas.py:49) | 颜色、尺码维度与选项均改为局部引用，真实组合规则不变 |
-| [`skus[].price`](../src/product_sku/models.py:21) | [`data.skus[].price.amount`](../src/api/sku_v2_schemas.py:53) | 标量变为对象中的金额，增加逐条价格状态 |
+| [`skus[].price`](../src/product_sku/models.py:21) | [`data.skus[].price.amount`](../src/api/sku_v2_schemas.py:53) | 标量变为对象中的金额，增加逐条价格状态；两版HTTP均输出向上取整整数字符串或空值 |
 | [`currency / price_source / price_basis`](../src/product_sku/models.py:22) | [`price.currency / source / basis`](../src/api/sku_v2_schemas.py:54) | 移入每条SKU价格对象；不可用时全部为空 |
 | 顶层 [`sku_count / completeness / reason / warnings / source`](../src/api/sku_schemas.py:22) | [`meta.sku_count / completeness / reason / warnings / source`](../src/api/sku_v2_schemas.py:75) | 数量及诊断元信息移入元对象；新增固定版本字符串 |
 | 顶层 [`status`](../src/api/sku_schemas.py:18) | 顶层 [`status`](../src/api/sku_v2_schemas.py:85) | 业务语义及HTTP映射不变，不与价格状态混用 |

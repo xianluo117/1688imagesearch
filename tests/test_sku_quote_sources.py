@@ -31,9 +31,11 @@ class QuoteDiscoveryTests(unittest.TestCase):
                 result = parse_detail(page(wrapped), URL)
                 self.assertEqual([s.price for s in result.skus], ["39.80"])
                 self.assertEqual(result.warnings, ["sku_completeness_unknown"])
-                self.assertEqual(ProductSkuResponse(**result.to_dict()).skus[0].price, "39.80")
+                response = ProductSkuResponse(**result.to_dict())
+                self.assertEqual(response.skus[0].price, "39.80")
+                self.assertEqual(response.model_dump(mode="json")["skus"][0]["price"], "40")
                 converted = convert_result(result)
-                self.assertEqual(converted.data.skus[0].price.amount, "39.80")
+                self.assertEqual(converted.data.skus[0].price.amount, "40")
                 self.assertEqual(converted.data.skus[0].price.status, "available")
 
     def test_encoded_container(self):
@@ -97,7 +99,7 @@ class QuoteDiscoveryTests(unittest.TestCase):
     def test_duplicate_roots_and_conflicting_candidates(self):
         first, _, _ = quoted()
         self.assertEqual(parse_detail(page([first, first]), URL).skus[0].price, "39.80")
-        for amount in ("40.00", "0", True, None):
+        for amount in ("39.01", "40.00", "0", True, None):
             other, _, _ = quoted([{"skuId": "901", "price": amount}])
             result = parse_detail(page([first, other]), URL)
             self.assertIsNone(result.skus[0].price)

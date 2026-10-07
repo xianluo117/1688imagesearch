@@ -234,7 +234,7 @@ md5(token + "&" + timestamp_ms + "&" + appKey + "&" + data_json)
 
 ## 11. API 服务
 
-SKU 查询、价格口径和 v1/v2 兼容说明见 [`docs/merchant-sku-api.md`](docs/merchant-sku-api.md)。请求必须提交 `product_url`；价格只在详情页有已验证逐 SKU 原始报价时返回，不回填商品价，不提供阶梯价或最终结算价。
+SKU 查询、价格口径和 v1/v2 兼容说明见 [`docs/merchant-sku-api.md`](docs/merchant-sku-api.md)。请求必须提交 [`product_url`](src/api/sku_schemas.py:14)；价格优先采用已验证逐 SKU 原始报价，其次同 SKU 折扣报价，不回填商品价，不提供阶梯价或最终结算价。两版 HTTP 金额均[向上取整为无小数点整数字符串](src/api/sku_price_presentation.py:6)，空值仍为空；内部结果、CLI 和图搜保留原精确金额。
 
 查询接口的完整调用文档见 [`docs/search-api.md`](docs/search-api.md)。
 

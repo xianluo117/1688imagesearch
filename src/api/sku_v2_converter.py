@@ -6,6 +6,7 @@ from product_sku.models import Sku, SkuResult, Specification
 from product_sku.size_summary import COLOR_NAMES, SIZE_NAMES, summarize_sizes
 from product_sku.specification_images import safe_image_url
 
+from .sku_price_presentation import present_price
 from .sku_v2_schemas import (
     ColorSizesV2, DataV2, DimensionV2, MetaV2, OptionV2, PriceV2,
     ProductSkuResponseV2, ProductV2, SellerV2, SizeDimensionV2, SizeSummaryV2, SkuV2,
@@ -25,7 +26,7 @@ def _price(sku: Sku) -> PriceV2:
         and Decimal(sku.price) > 0
     )
     return PriceV2(
-        amount=sku.price if available else None,
+        amount=present_price(sku.price) if available else None,
         currency=sku.currency if available else None,
         status="available" if available else "unavailable",
         source=sku.price_source if available else None,

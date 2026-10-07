@@ -1,9 +1,11 @@
 """Typed HTTP contract for the independent SKU query."""
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from product_sku.models import ColorSizes, SizeDimension, Sku, SpecificationImage
+
+from .sku_price_presentation import present_price
 
 
 class ProductSkuRequest(BaseModel):
@@ -31,3 +33,12 @@ class ProductSkuResponse(BaseModel):
     specification_images: list[SpecificationImage] = Field(default_factory=list)
     sizes: list[SizeDimension] = Field(default_factory=list)
     color_sizes: list[ColorSizes] = Field(default_factory=list)
+
+    @field_serializer("skus", mode="wrap")
+    def serialize_sku_prices(self, skus, handler):
+        """Change only HTTP output, not internal Sku values or its schema."""
+        rows = handler(skus)
+        for row in rows:
+            if "price" in row:
+                row["price"] = present_price(row["price"])
+        return rows

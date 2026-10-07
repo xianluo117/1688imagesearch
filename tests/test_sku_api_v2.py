@@ -146,6 +146,44 @@ class ProductSkuApiV2Tests(unittest.IsolatedAsyncioTestCase):
         self.fake.fetch.assert_called_once_with(fixtures.URL)
         self.fake.__exit__.assert_called_once()
 
+    async def test_both_http_versions_ceil_prices_without_mutation(self):
+        from test_sku_price_presentation import CASES
+
+        original = fixtures.result()
+        original.skus = [replace(original.skus[0], sku_id=str(index), price=raw,
+                                 currency="CNY", price_source="synthetic", price_basis="test_only")
+                         for index, (raw, _) in enumerate(CASES)]
+        before = original.to_dict()
+        with patch.object(self.app.state.sku_service, "query", AsyncMock(return_value=original)):
+            v1 = await self.post(path=V1)
+            v2 = await self.post(path=V2)
+        self.assertEqual(v1.status_code, 200)
+        self.assertEqual(v2.status_code, 200)
+        expected = [amount for _, amount in CASES]
+        self.assertEqual([s["price"] for s in v1.json()["skus"]], expected)
+        self.assertEqual([s["price"]["amount"] for s in v2.json()["data"]["skus"]], expected)
+        self.assertEqual(original.to_dict(), before)
+        for sku in v2.json()["data"]["skus"][:-1]:
+            self.assertEqual(sku["price"]["source"], "synthetic")
+            self.assertEqual(sku["price"]["basis"], "test_only")
+
+    async def test_both_http_versions_keep_exact_price_conflict_null(self):
+        from product_sku.parser import parse_detail
+        from test_product_sku import page, URL
+        from test_sku_quote_sources import quoted
+
+        first, _, _ = quoted([{"skuId": "901", "price": "39.01"}])
+        second, _, _ = quoted([{"skuId": "901", "price": "39.80"}])
+        original = parse_detail(page([first, second]), URL)
+        with patch.object(self.app.state.sku_service, "query", AsyncMock(return_value=original)):
+            v1 = (await self.post(path=V1)).json()
+            v2 = (await self.post(path=V2)).json()
+        self.assertIsNone(v1["skus"][0]["price"])
+        self.assertIsNone(v2["data"]["skus"][0]["price"]["amount"])
+        self.assertEqual(v2["data"]["skus"][0]["price"]["status"], "unavailable")
+        self.assertIn("conflicting_sku_price", v1["warnings"])
+        self.assertEqual(v1["warnings"], v2["meta"]["warnings"])
+
     async def test_openapi_nested_contract(self):
         schema = self.app.openapi()
         responses = schema["paths"][V2]["post"]["responses"]
