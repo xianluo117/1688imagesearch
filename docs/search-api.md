@@ -8,7 +8,7 @@
 - 创建、查询和取消商品任务。
 - 查询服务健康状态。
 
-Cookie 上传接口由服务管理员使用，不属于普通查询流程。
+Cookie 上传接口由服务管理员使用，不属于普通查询流程。图片上传、图搜商品查询和SKU共享SQLite持久化队列；全局配置、SKU异步三个路由、暂停恢复及停机升级见 [`unified-queue.md`](unified-queue.md)。本文响应示例为业务字段节选；查询和取消还返回 [`cancel_requested`](../src/api/app.py:59) 与 [`scheduler`](../src/api/app.py:58)。
 
 ## 2. 基础信息
 
@@ -95,7 +95,7 @@ Content-Type: application/json
 | `failed`    | 任务执行失败，`error` 包含错误  | 否           |
 | `cancelled` | 任务已取消                      | 否           |
 
-建议轮询间隔为 1～2 秒。
+建议轮询间隔为 1～2 秒。三类任务由统一调度器领取；任务自身状态与全局保护状态独立。查询响应的 [`scheduler`](../src/api/queue_api.py:16) 包含正常、冷却或暂停状态、原因、冷却截止时间及剩余秒数；排队或等待保护解除不表示任务失败。
 
 ## 5. 创建上传任务
 
@@ -151,7 +151,7 @@ Content-Type: application/json
 | 字段      | 类型   | 说明                  |
 | --------- | ------ | --------------------- |
 | `task_id` | string | 上传任务唯一标识      |
-| `status`  | string | 新任务固定为 `queued` |
+| [`status`](../src/api/app.py:209) | string | 新任务为排队；幂等重放返回原任务当前状态 |
 
 ### 5.3 cURL 示例
 
@@ -311,7 +311,7 @@ Content-Type: application/json
 }
 ```
 
-每次请求都会创建新的商品任务。重复提交同一个 `upload_task_id` 不会复用旧商品任务。
+不传幂等键时，每次请求创建新任务，即使关联同一上传任务也不复用。上传和商品创建均支持可选 [`Idempotency-Key`](../src/api/sku_http.py:26)：1～255字符且非全空白，在同一数据库与SKU提交全局共享。同键同类型同参数复用原任务；类型或参数不同返回HTTP 409。复用可能返回已结束状态，不应假定创建响应始终排队。键随终态任务清理，详见 [`unified-queue.md`](unified-queue.md)。
 
 ### 7.4 cURL 示例
 
@@ -458,7 +458,7 @@ X-API-Key: your-search-api-key
 ### 9.2 取消语义
 
 - `queued`：立即变为 `cancelled`。
-- `running`：记录取消请求，当前阻塞 HTTP 请求结束后停止后续步骤。
+- 执行中：先设置 [`cancel_requested`](../src/api/queue_store.py:218)，停止后续请求；底层阻塞操作真实结束后才转入取消并释放执行名额，迟到结果不能覆盖取消。取消响应可能仍为执行中，应继续轮询到终态。
 - `succeeded`、`failed`、`cancelled`：幂等返回当前状态。
 - 上传任务取消后不能创建商品任务。
 
@@ -696,7 +696,10 @@ console.table(productTask.result.products);
 |       `409` | `UPLOAD_TASK_CANCELLED`  | 上传任务已取消                    |
 |       `409` | `UPLOAD_TASK_FAILED`     | 上传任务已失败                    |
 |       `422` | 参数校验错误             | 请求字段缺失、类型错误或 URL 无效 |
-|       `429` | `QUEUE_FULL`             | 对应任务队列已满                  |
+| 409 | [`IDEMPOTENCY_CONFLICT`](../src/api/app.py:126) | 全局幂等键用于不同类型或参数 |
+| 422 | [`INVALID_IDEMPOTENCY_KEY`](../src/api/sku_http.py:29) | 幂等键为空白或长度超过255 |
+| 429 | [`QUEUE_FULL`](../src/api/app.py:206) | 三类排队加执行中总容量已满 |
+| 503 | [`QUEUE_STOPPING`](../src/api/app.py:132) | 正在停机，不接纳新任务 |
 |       `503` | `COOKIE_UNAVAILABLE`     | 尚未上传可用的 1688 Cookie        |
 
 ### 13.3 商品任务创建失败示例
@@ -724,14 +727,14 @@ Content-Type: application/json
 | `IMAGE_URL_REJECTED`    | 图片 URL 被安全策略拒绝       | 更换为可公开访问的公网图片 URL  |
 | `IMAGE_DOWNLOAD_FAILED` | 图片下载、格式或体积检查失败  | 检查 URL、图片格式和文件大小    |
 | `COOKIE_UNAVAILABLE`    | Worker 未取得可用 Cookie      | 联系服务管理员上传 Cookie       |
-| `COOKIE_INVALID`        | 1688 登录态无效               | 重新登录并上传完整 Cookie       |
-| `MTOP_TOKEN_INVALID`    | MTOP Token 无效或过期         | 刷新 1688 页面并重新上传 Cookie |
+| [`COOKIE_INVALID`](../src/api/app.py:140) | 1688 登录态无效 | 重新登录、上传Cookie后检查保护状态并人工恢复 |
+| [`MTOP_TOKEN_INVALID`](../src/api/worker.py:1) | MTOP Token 无效或过期 | 刷新会话、上传Cookie后检查保护状态并人工恢复 |
 | `MTOP_NETWORK_ERROR`    | MTOP 网络请求或 HTTP 请求失败 | 稍后重试并检查服务日志          |
 | `UPLOAD_NO_IMAGE_ID`    | 上传响应缺少图片标识          | 稍后重试并检查服务日志          |
 | `PRODUCTS_NOT_FOUND`    | 轮询结束仍没有商品            | 可重新创建商品任务或更换图片    |
-| `RISK_CONTROL`          | 1688 返回验证码或风控         | 在浏览器完成验证并更新 Cookie   |
-| `RATE_LIMITED`          | 1688 服务端限流               | 降低请求频率后重试              |
-| `TASK_TIMEOUT`          | 任务总执行时间超过限制        | 稍后创建新任务                  |
+| [`RISK_CONTROL`](../src/api/worker.py:1) | 1688 验证或风控，全局暂停 | 浏览器完成验证，必要时更新Cookie，再显式人工恢复 |
+| [`RATE_LIMITED`](../src/api/worker.py:1) | 1688 限流，全局冷却 | 等待冷却，失败任务不会自动重做 |
+| [`TASK_TIMEOUT`](../src/api/worker.py:1) | 有效执行预算耗尽，不含排队及实际保护等待 | 核对任务终态后按需重做，不视为单次网络超时 |
 | `PROTOCOL_ERROR`        | 1688 响应结构不符合预期       | 检查服务日志和协议变化          |
 | `INTERNAL_ERROR`        | 未分类内部错误                | 联系服务管理员检查日志          |
 | `TASK_CANCELLED`        | 任务已取消                    | 按需创建新任务                  |
@@ -761,58 +764,35 @@ GET /api/v1/health
 X-API-Key: your-search-api-key
 ```
 
-响应示例：
+响应读取：
 
-```json
-{
-  "status": "ok",
-  "cookie": {
-    "available": true,
-    "version": 3,
-    "cookie_count": 44,
-    "uploaded_at": 1786503915.2712467
-  },
-  "upload_workers": 2,
-  "product_workers": 2,
-  "upload_tasks": {
-    "queued": 0,
-    "running": 1,
-    "succeeded": 25,
-    "failed": 2,
-    "cancelled": 1
-  },
-  "product_tasks": {
-    "queued": 1,
-    "running": 0,
-    "succeeded": 20,
-    "failed": 3,
-    "cancelled": 0
-  }
-}
-```
+| 字段 | 含义 |
+|---|---|
+| [`cookie`](../src/api/app.py:157) | 活动Cookie可用性和版本信息 |
+| [`upload_workers / product_workers`](../src/api/app.py:158) | 兼容字段，均为0，旧工作池不运行 |
+| [`global_workers`](../src/api/app.py:160) | 全局配置并发，默认1 |
+| [`queue`](../src/api/app.py:161) | 三类总计数、接纳状态、容量及全局保护快照 |
+| [`upload_tasks / product_tasks`](../src/api/app.py:162) | 原两类业务任务计数 |
+
+另可调用 [`GET /api/v1/queue`](../src/api/queue_api.py:91) 查看五类状态计数及冷却剩余时间，调用 [`POST /api/v1/queue/resume`](../src/api/queue_api.py:98) 人工恢复保护状态；两者均须搜索密钥鉴权。Cookie更新和服务重启不自动清除暂停。基础存活正常不代表队列正在执行。
 
 ## 16. 并发、队列和超时
 
 默认配置：
 
-- 上传 Worker：2。
-- 商品 Worker：2。
-- 上传任务总超时：240 秒。
-- 商品任务总超时：180 秒。
-- 单次 MTOP HTTP 请求超时：90 秒。
+- 图片上传、图搜、SKU共享总任务并发1、排队加执行中容量100。
+- 所有实际1688请求共享随机2～4秒启动间隔，轮询、网络重试、令牌刷新及重定向也需许可；外部图片下载不消耗1688许可，但占上传执行名额。
+- 上传有效执行预算240秒，图搜及SKU各180秒；单次MTOP网络超时90秒。排队不计入执行预算，只有实际在请求入口等待暂停或冷却的时间扣除；普通间隔及在途网络仍计入。
+- 限流默认冷却60秒，上游可信等待要求更长则遵守上游；验证码或登录异常持久化暂停，须处理原因后人工恢复。调速不能保证避免验证码。
+- 全局配置是唯一权威，旧分类型并发已弃用，不改变默认总并发1，也不叠加旧SKU启动限速。
 
-任务超过 Worker 并发数时进入 `queued`。队列达到上限后，创建接口返回 HTTP `429` 和 `QUEUE_FULL`。
+并发占满时正常排队，只有三类共享容量满才拒绝提交。客户端轮询超时不会取消后台任务；排队和保护等待没有固定完成上限，不要将执行预算当作端到端等待上限。队列满时退避，不密集重建任务。
 
-调用方处理建议：
-
-- 正常处理 `queued`，不要将排队视为失败。
-- 对 HTTP `429` 使用指数退避。
-- 不要高频轮询同一任务。
-- 客户端等待时间应高于服务端任务总超时。
+取消、预算耗尽和正常关闭不提前释放在途操作名额。正常关闭停止接纳和领取、保留排队任务、等待实际操作结束。异常重启以至少一次执行恢复，可能重复落库前已发出的请求。仅支持单进程；停机升级保留旧任务ID及取消记录，禁止新旧消费者共跑。详细配置和运维流程见 [`unified-queue.md`](unified-queue.md)。
 
 ## 17. 任务保留
 
-终态任务默认保留 24 小时。任务被清理后，查询接口返回 HTTP `404`。
+终态完成后默认保留24小时，清理服务每小时执行；任务、业务结果和幂等键一起删除。未结束任务不会清理，仍被依赖的父任务可能保留更久。不是从提交起固定24小时失效。清理后查询返回HTTP 404，同一幂等键可创建新任务。
 
 调用方应在任务成功后及时保存：
 

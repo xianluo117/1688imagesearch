@@ -171,7 +171,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.app = create_app(self.settings)
         # Route regression tests must not dispatch real image-search requests.
-        for workers in (self.app.state.upload_workers, self.app.state.product_workers):
+        for workers in (self.app.state.scheduler,):
             stub = patch.object(workers, "start", AsyncMock())
             stub.start()
             self.addCleanup(stub.stop)
@@ -232,8 +232,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["upload_workers"], 1)
-        self.assertEqual(payload["product_workers"], 1)
+        self.assertEqual(payload["upload_workers"], 0)
+        self.assertEqual(payload["product_workers"], 0)
+        self.assertEqual(payload["global_workers"], 1)
+        self.assertEqual(payload["queue"]["scheduler"]["state"], "normal")
         self.assertIn("cancelled", payload["upload_tasks"])
         self.assertIn("cancelled", payload["product_tasks"])
 

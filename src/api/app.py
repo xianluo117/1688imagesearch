@@ -24,7 +24,11 @@ from .schemas import (
     UploadTaskCreated,
     UploadTaskStatusResponse,
 )
-from .worker import ProductWorkerPool, TaskCleanupService, UploadWorkerPool
+from .worker import TaskCleanupService
+from .queue_scheduler import UnifiedQueueScheduler
+from .queue_store import IdempotencyConflict, QueueNotAccepting
+from .queue_api import router as queue_router, scheduler_status
+from .sku_http import idempotency_key
 from .sku import router as sku_router
 from .sku_service import ProductSkuService
 from .sku_v2 import router as sku_v2_router
@@ -37,7 +41,7 @@ def _error_payload(code: str | None, message: str | None) -> dict[str, str]:
     }
 
 
-def _upload_task_response(task: UploadTaskRecord) -> UploadTaskStatusResponse:
+def _upload_task_response(task: UploadTaskRecord, scheduler: dict) -> UploadTaskStatusResponse:
     result = None
     if task.status == "succeeded" and task.image_id and task.search_page_url:
         result = {"image_id": task.image_id, "search_page_url": task.search_page_url}
@@ -51,10 +55,12 @@ def _upload_task_response(task: UploadTaskRecord) -> UploadTaskStatusResponse:
         finished_at=task.finished_at,
         result=result,
         error=error,
+        scheduler=scheduler,
+        cancel_requested=task.cancel_requested,
     )
 
 
-def _product_task_response(task: ProductTaskRecord) -> ProductTaskStatusResponse:
+def _product_task_response(task: ProductTaskRecord, scheduler: dict) -> ProductTaskStatusResponse:
     error = _error_payload(task.error_code, task.error_message) if task.status in {"failed", "cancelled"} else None
     return ProductTaskStatusResponse(
         task_id=task.task_id,
@@ -66,6 +72,8 @@ def _product_task_response(task: ProductTaskRecord) -> ProductTaskStatusResponse
         finished_at=task.finished_at,
         result=task.result,
         error=error,
+        scheduler=scheduler,
+        cancel_requested=task.cancel_requested,
     )
 
 
@@ -85,24 +93,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
     database = Database(resolved.database_path)
     cookie_store = CookieStore(database, resolved.cookie_encryption_key)
-    upload_workers = UploadWorkerPool(database, cookie_store, resolved)
-    product_workers = ProductWorkerPool(database, cookie_store, resolved)
+    scheduler = UnifiedQueueScheduler(database, cookie_store, resolved)
     cleanup_service = TaskCleanupService(database, resolved)
-    sku_service = ProductSkuService(cookie_store, resolved)
+    sku_service = ProductSkuService(cookie_store, resolved, scheduler)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await database.initialize()
-        await upload_workers.start()
-        await product_workers.start()
+        await scheduler.start()
         await cleanup_service.start()
         try:
             yield
         finally:
-            await sku_service.stop()
+            await scheduler.stop()
             await cleanup_service.stop()
-            await product_workers.stop()
-            await upload_workers.stop()
 
     app = FastAPI(
         title="1688 Two-stage Image Search API",
@@ -113,11 +117,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved
     app.state.database = database
     app.state.cookie_store = cookie_store
-    app.state.upload_workers = upload_workers
-    app.state.product_workers = product_workers
+    app.state.scheduler = scheduler
     app.state.sku_service = sku_service
     app.include_router(sku_router)
     app.include_router(sku_v2_router)
+    app.include_router(queue_router)
+
+    @app.exception_handler(IdempotencyConflict)
+    async def idempotency_conflict(_request: Request, _exc: IdempotencyConflict):
+        return JSONResponse(status_code=409, content={"detail": {
+            "code": "IDEMPOTENCY_CONFLICT", "message": "幂等键已用于不同参数",
+        }})
+
+    @app.exception_handler(QueueNotAccepting)
+    async def queue_stopping(_request: Request, _exc: QueueNotAccepting):
+        return JSONResponse(status_code=503, content={"detail": {
+            "code": "QUEUE_STOPPING", "message": "任务队列正在停止",
+        }})
 
     @app.exception_handler(ProtocolError)
     async def protocol_error_handler(_request: Request, exc: ProtocolError) -> JSONResponse:
@@ -139,8 +155,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return DetailedHealthResponse(
             status="ok",
             cookie=await cookie_store.status(),
-            upload_workers=resolved.upload_worker_count,
-            product_workers=resolved.product_worker_count,
+            upload_workers=0,
+            product_workers=0,
+            global_workers=resolved.global_worker_count,
+            queue=await scheduler.snapshot(),
             upload_tasks=await database.upload_task_counts(),
             product_tasks=await database.product_task_counts(),
         )
@@ -168,6 +186,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def create_upload_task(
         body: UploadTaskCreate,
+        request: Request,
         x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     ) -> UploadTaskCreated:
         require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
@@ -179,13 +198,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task_id = await database.create_upload_task(
             str(body.image_url),
             max_active=resolved.max_queued_tasks,
+            idempotency_key=idempotency_key(request),
         )
         if task_id is None:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={"code": "QUEUE_FULL", "message": "任务队列已满"},
             )
-        return UploadTaskCreated(task_id=task_id, status="queued")
+        task = await database.get_upload_task(task_id)
+        return UploadTaskCreated(task_id=task_id, status=task.status)
 
     @app.get("/api/v1/upload-tasks/{task_id}", response_model=UploadTaskStatusResponse)
     async def get_upload_task(
@@ -199,7 +220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "UPLOAD_TASK_NOT_FOUND", "message": "上传任务不存在"},
             )
-        return _upload_task_response(task)
+        return _upload_task_response(task, await scheduler_status(database))
 
     @app.delete("/api/v1/upload-tasks/{task_id}", response_model=UploadTaskStatusResponse)
     async def cancel_upload_task(
@@ -213,7 +234,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "UPLOAD_TASK_NOT_FOUND", "message": "上传任务不存在"},
             )
-        return _upload_task_response(task)
+        return _upload_task_response(task, await scheduler_status(database))
 
     @app.post(
         "/api/v1/product-tasks",
@@ -222,20 +243,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def create_product_task(
         body: ProductTaskCreate,
+        request: Request,
         x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     ) -> ProductTaskCreated:
         require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
         task_id, error_code = await database.create_product_task(
             body.upload_task_id,
             max_active=resolved.max_queued_tasks,
+            idempotency_key=idempotency_key(request),
         )
         if error_code is not None:
             _raise_product_creation_error(error_code)
         assert task_id is not None
+        task = await database.get_product_task(task_id)
         return ProductTaskCreated(
             task_id=task_id,
             upload_task_id=body.upload_task_id,
-            status="queued",
+            status=task.status,
         )
 
     @app.get("/api/v1/product-tasks/{task_id}", response_model=ProductTaskStatusResponse)
@@ -250,7 +274,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "PRODUCT_TASK_NOT_FOUND", "message": "商品任务不存在"},
             )
-        return _product_task_response(task)
+        return _product_task_response(task, await scheduler_status(database))
 
     @app.delete("/api/v1/product-tasks/{task_id}", response_model=ProductTaskStatusResponse)
     async def cancel_product_task(
@@ -264,6 +288,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "PRODUCT_TASK_NOT_FOUND", "message": "商品任务不存在"},
             )
-        return _product_task_response(task)
+        return _product_task_response(task, await scheduler_status(database))
 
     return app

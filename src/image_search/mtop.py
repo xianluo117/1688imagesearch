@@ -6,6 +6,9 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
+
+from request_control import RequestControl, control_scope, disable_transport_retries, notify
 
 import requests
 from curl_cffi import requests as curl_requests
@@ -138,8 +141,11 @@ class MtopClient:
         timeout: float = 30.0,
         network_retries: int = 2,
         response_hook: Callable[[MtopRequest, dict[str, Any]], None] | None = None,
+        request_control: RequestControl | None = None,
     ) -> None:
         self.session = session
+        self.request_control = request_control
+        disable_transport_retries(session)
         self.app_key = app_key
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
@@ -160,7 +166,7 @@ class MtopClient:
         values = [cookie.value for cookie in jar if cookie.name == "_m_h5_tk"]
         return values[-1] if values else None
 
-    def _request_once(self, request: MtopRequest, data_text: str) -> dict[str, Any]:
+    def _signed_query(self, request: MtopRequest, data_text: str) -> dict[str, str]:
         timestamp_ms = str(int(time.time() * 1000))
         token = extract_token(self._token_cookie())
         sign = calculate_sign(token, timestamp_ms, self.app_key, data_text)
@@ -177,34 +183,79 @@ class MtopClient:
         }
         if request.extra_query:
             query.update(request.extra_query)
+        # These fields must never reuse an override or a redirect's stale signature.
+        query.update(t=timestamp_ms, sign=sign, appKey=self.app_key)
+        return query
 
+    @staticmethod
+    def _check_access_address(url: str) -> None:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        path = parts.path.lower()
+        if host in {"login.1688.com", "login.taobao.com", "passport.1688.com"} or path.startswith(
+            ("/login", "/member/signin")
+        ):
+            raise AuthenticationError("MTOP 重定向至登录页面", ret=["LOGIN_REQUIRED"])
+        if any(marker in path for marker in ("/_____tmd_____/", "/punish", "/challenge", "/captcha", "/validate")):
+            raise RiskControlError("MTOP 重定向至验证页面", ret=["CAPTCHA"])
+
+    def _request_once(self, request: MtopRequest, data_text: str) -> dict[str, Any]:
         url = f"{self.endpoint}/{request.api}/{request.version}/"
+        origin = urlsplit(url)
         method = request.method.upper()
-        try:
+        if method not in {"GET", "POST"}:
+            raise ProtocolError(f"不支持的 HTTP 方法: {method}")
+        redirect_query: dict[str, str] = {}
+        for redirects in range(3):
+            notify(self.request_control, "before_request")
+            query = {**redirect_query, **self._signed_query(request, data_text)}
             if method == "GET":
                 response = self.session.get(
-                    url,
-                    params={**query, "data": data_text},
-                    timeout=self.timeout,
-                )
-            elif method == "POST":
-                response = self.session.post(
-                    url,
-                    params=query,
-                    data={"data": data_text},
-                    timeout=self.timeout,
+                    url, params={**query, "data": data_text},
+                    timeout=self.timeout, allow_redirects=False,
                 )
             else:
-                raise ProtocolError(f"不支持的 HTTP 方法: {method}")
-        except (requests.RequestException, curl_requests.RequestsError):
-            raise
-
-        if response.status_code == 429:
-            raise RateLimitError("MTOP HTTP 429", ret=["HTTP_429"])
-        response.raise_for_status()
-        return parse_json_or_jsonp(response)
+                response = self.session.post(
+                    url, params=query, data={"data": data_text},
+                    timeout=self.timeout, allow_redirects=False,
+                )
+            try:
+                notify(self.request_control, "observe_response", response)
+                self._check_access_address(str(getattr(response, "url", "") or url))
+                if response.status_code == 429:
+                    raise RateLimitError("MTOP HTTP 429", ret=["HTTP_429"])
+                if response.status_code == 401:
+                    raise AuthenticationError("MTOP HTTP 401", ret=["LOGIN_REQUIRED"])
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location", "")
+                    target = urljoin(url, location)
+                    self._check_access_address(target)
+                    if not location or redirects >= 2:
+                        raise ProtocolError("MTOP 重定向超过上限或缺少 Location")
+                    parts = urlsplit(target)
+                    # Only replay signed API requests within the original MTOP origin.
+                    if (parts.scheme, parts.netloc) != (origin.scheme, origin.netloc) or not parts.path.startswith(origin.path.rsplit("/", 3)[0] + "/"):
+                        raise ProtocolError("MTOP 重定向目标不是原站 API")
+                    redirect_query = dict(parse_qsl(parts.query, keep_blank_values=True))
+                    for key in ("t", "sign", "appKey", "data"):
+                        redirect_query.pop(key, None)
+                    url = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+                    if response.status_code == 303 or (response.status_code in {301, 302} and method == "POST"):
+                        method = "GET"
+                    continue
+                response.raise_for_status()
+                return parse_json_or_jsonp(response)
+            finally:
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
+        raise ProtocolError("MTOP 重定向超过上限")
 
     def request(self, request: MtopRequest) -> dict[str, Any]:
+        with control_scope():
+            return self._request(request)
+
+    def _request(self, request: MtopRequest) -> dict[str, Any]:
         data_text = compact_json(request.data)
         token_retry_used = False
         network_attempt = 0
@@ -234,14 +285,19 @@ class MtopClient:
                 if self.response_hook:
                     self.response_hook(request, payload)
                 return payload
-            except TokenError:
+            except TokenError as exc:
+                notify(self.request_control, "observe_error", exc)
                 token_after = self._token_cookie()
                 if not token_retry_used and token_after and token_after != token_before:
                     token_retry_used = True
                     LOGGER.info("MTOP Token 已刷新，正在重新签名重试")
                     continue
                 raise
+            except ProtocolError as exc:
+                notify(self.request_control, "observe_error", exc)
+                raise
             except (requests.RequestException, curl_requests.RequestsError) as exc:
+                notify(self.request_control, "observe_error", exc)
                 elapsed = time.monotonic() - started_at
                 response = getattr(exc, "response", None)
                 status = getattr(response, "status_code", None)

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import aiosqlite
+
+from .queue_schema import initialize_queue
+from .queue_store import QueueStoreMixin
 
 TaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
@@ -46,9 +48,13 @@ class ProductTaskRecord:
     finished_at: float | None
 
 
-class Database:
-    def __init__(self, path: str | Path) -> None:
+class Database(QueueStoreMixin):
+    def __init__(self, path: str | Path, *, queue_capacity: int = 100) -> None:
+        if queue_capacity < 1:
+            raise ValueError("queue_capacity must be positive")
         self.path = Path(path)
+        self.queue_capacity = queue_capacity
+        self.accepting = True
 
     async def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,24 +122,8 @@ class Database:
                     ON product_tasks(upload_task_id, created_at);
                 """
             )
-            for table in ("upload_tasks", "product_tasks"):
-                await db.execute(
-                    f"""
-                    UPDATE {table}
-                    SET status='cancelled', finished_at=?, updated_at=?
-                    WHERE status='running' AND cancel_requested=1
-                    """,
-                    (now, now),
-                )
-                await db.execute(
-                    f"""
-                    UPDATE {table}
-                    SET status='queued', started_at=NULL, updated_at=?
-                    WHERE status='running' AND cancel_requested=0
-                    """,
-                    (now,),
-                )
-            await db.commit()
+            db.row_factory = aiosqlite.Row
+            await initialize_queue(db, now)
 
     async def store_cookie(
         self,
@@ -185,119 +175,34 @@ class Database:
             return None
         return int(row[0]), bytes(row[1]), int(row[2]), float(row[3])
 
-    async def create_upload_task(self, image_url: str, *, max_active: int) -> str | None:
-        now = time.time()
-        task_id = str(uuid.uuid4())
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM upload_tasks WHERE status IN ('queued','running')"
-            )
-            if int((await cursor.fetchone())[0]) >= max_active:
-                await db.rollback()
-                return None
-            await db.execute(
-                """
-                INSERT INTO upload_tasks(task_id, status, image_url, created_at, updated_at)
-                VALUES (?, 'queued', ?, ?, ?)
-                """,
-                (task_id, image_url, now, now),
-            )
-            await db.commit()
+    async def create_upload_task(
+        self, image_url: str, *, max_active: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> str | None:
+        task_id, _ = await self._enqueue(
+            "upload", {"image_url": image_url}, max_active=max_active,
+            idempotency_key=idempotency_key,
+        )
         return task_id
 
     async def create_product_task(
-        self,
-        upload_task_id: str,
-        *,
-        max_active: int,
+        self, upload_task_id: str, *, max_active: int | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[str | None, str | None]:
-        now = time.time()
-        task_id = str(uuid.uuid4())
-        async with aiosqlite.connect(self.path) as db:
-            db.row_factory = aiosqlite.Row
-            await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                "SELECT status, cookie_version, image_id FROM upload_tasks WHERE task_id=?",
-                (upload_task_id,),
-            )
-            upload = await cursor.fetchone()
-            if upload is None:
-                await db.rollback()
-                return None, "UPLOAD_TASK_NOT_FOUND"
-            if upload["status"] == "cancelled":
-                await db.rollback()
-                return None, "UPLOAD_TASK_CANCELLED"
-            if upload["status"] == "failed":
-                await db.rollback()
-                return None, "UPLOAD_TASK_FAILED"
-            if upload["status"] != "succeeded" or not upload["image_id"] or upload["cookie_version"] is None:
-                await db.rollback()
-                return None, "UPLOAD_TASK_NOT_READY"
-            count_cursor = await db.execute(
-                "SELECT COUNT(*) FROM product_tasks WHERE status IN ('queued','running')"
-            )
-            if int((await count_cursor.fetchone())[0]) >= max_active:
-                await db.rollback()
-                return None, "QUEUE_FULL"
-            await db.execute(
-                """
-                INSERT INTO product_tasks(
-                    task_id, upload_task_id, status, cookie_version, created_at, updated_at
-                ) VALUES (?, ?, 'queued', ?, ?, ?)
-                """,
-                (task_id, upload_task_id, int(upload["cookie_version"]), now, now),
-            )
-            await db.commit()
-        return task_id, None
+        return await self._enqueue(
+            "product", {"upload_task_id": upload_task_id}, max_active=max_active,
+            idempotency_key=idempotency_key,
+        )
 
     async def claim_upload_task(self) -> UploadTaskRecord | None:
-        now = time.time()
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                "SELECT task_id FROM upload_tasks WHERE status='queued' ORDER BY created_at LIMIT 1"
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                await db.rollback()
-                return None
-            cookie_cursor = await db.execute(
-                "SELECT version FROM cookie_versions WHERE is_active=1 LIMIT 1"
-            )
-            cookie_row = await cookie_cursor.fetchone()
-            cookie_version = int(cookie_row[0]) if cookie_row else None
-            await db.execute(
-                """
-                UPDATE upload_tasks
-                SET status='running', cookie_version=?, started_at=?, updated_at=?
-                WHERE task_id=? AND status='queued'
-                """,
-                (cookie_version, now, now, row[0]),
-            )
-            await db.commit()
-        return await self.get_upload_task(str(row[0]))
+        # Legacy test compatibility only; production uses claim_next_task exclusively.
+        task = await self._claim_queue_task(kind="upload", max_running=None)
+        return await self.get_upload_task(task.task_id) if task else None
 
     async def claim_product_task(self) -> ProductTaskRecord | None:
-        now = time.time()
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                "SELECT task_id FROM product_tasks WHERE status='queued' ORDER BY created_at LIMIT 1"
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                await db.rollback()
-                return None
-            await db.execute(
-                """
-                UPDATE product_tasks SET status='running', started_at=?, updated_at=?
-                WHERE task_id=? AND status='queued'
-                """,
-                (now, now, row[0]),
-            )
-            await db.commit()
-        return await self.get_product_task(str(row[0]))
+        # No independent production worker pools may consume these adapters.
+        task = await self._claim_queue_task(kind="product", max_running=None)
+        return await self.get_product_task(task.task_id) if task else None
 
     async def complete_upload_task(
         self,
@@ -514,27 +419,4 @@ class Database:
         return counts
 
     async def cleanup_tasks(self, older_than: float) -> int:
-        deleted = 0
-        async with aiosqlite.connect(self.path) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            product_cursor = await db.execute(
-                """
-                DELETE FROM product_tasks
-                WHERE status IN ('succeeded','failed','cancelled') AND finished_at < ?
-                """,
-                (older_than,),
-            )
-            deleted += int(product_cursor.rowcount)
-            upload_cursor = await db.execute(
-                """
-                DELETE FROM upload_tasks
-                WHERE status IN ('succeeded','failed','cancelled') AND finished_at < ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM product_tasks WHERE product_tasks.upload_task_id=upload_tasks.task_id
-                  )
-                """,
-                (older_than,),
-            )
-            deleted += int(upload_cursor.rowcount)
-            await db.commit()
-        return deleted
+        return await self.cleanup_queue_tasks(older_than)

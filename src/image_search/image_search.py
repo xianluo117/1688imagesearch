@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from curl_cffi import requests as curl_requests
+from request_control import RequestControl
 
 from .cookies import ImportedCookie, load_cookie_records_into_session, load_cookies
 from .errors import ProductsNotFoundError, ProtocolError, TaskCancelledError, UploadNoImageIdError
@@ -90,6 +91,7 @@ class ImageSearchClient:
         session: Any | None = None,
         timeout: float = 30.0,
         network_retries: int = 2,
+        request_control: RequestControl | None = None,
     ) -> None:
         if (cookie_file is None) == (cookie_records is None):
             raise ProtocolError("cookie_file 与 cookie_records 必须且只能提供一个")
@@ -102,10 +104,12 @@ class ImageSearchClient:
             else load_cookie_records_into_session(self.session, cookie_records or [])
         )
         self._raw_sequence = 0
+        self.request_control = request_control
         self.mtop = MtopClient(
             self.session,
             timeout=timeout,
             network_retries=network_retries,
+            request_control=request_control,
             response_hook=self._archive_response if self.options.raw_response_dir else None,
         )
 

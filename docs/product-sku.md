@@ -8,7 +8,7 @@
 
 输入标准1688详情链接，请求详情HTML，输出商品ID、SKU ID、规格位置和值、规格名、商品主图及状态。可使用命令行，或第7节新增的独立HTTP接口。
 
-- HTTP接口复用服务器已有Cookie和查询鉴权，不修改图搜流程，不创建图搜任务或新数据库表，不调用MTOP，不启用浏览器兜底。
+- HTTP接口复用服务器Cookie和查询鉴权；SKU不创建图搜任务、不调用MTOP、不启用浏览器兜底，但与上传、图搜共用SQLite统一队列表、调度器和请求许可。独立命令行不加入API队列。
 - 命令行只读取明确传入的Cookie路径；HTTP接口读取服务器当前激活版本，不需要调用方再次上传Cookie。
 - 没有真实Cookie，不代表已成功在线采集。目标商品772946834568仍待实测。
 - 已验证交易模型支持规格名称及位置，逐行核对规格定义，不推断颜色、尺码。旧重量表来源仍可能缺少规格名称。
@@ -122,7 +122,9 @@ Invoke-RestMethod -Method Post `
 
 ### 7.3 响应和错误
 
-有分类结果时直接返回 [`ProductSkuResponse`](../src/api/sku_schemas.py:15)，不包任务对象、不返回轮询ID。包含商品ID、规范链接、来源、状态、原因、主图、SKU数组、SKU数量、警告和完整性；结构沿用[独立结果模型](../src/product_sku/models.py:21)。HTTP状态映射见[路由](../src/api/sku.py:63)。
+同步入口先入队，等待期内取得分类结果时直接返回 [`ProductSkuResponse`](../src/api/sku_schemas.py:15)，不包任务对象。包含商品ID、规范链接、来源、状态、原因、主图、SKU数组、SKU数量、警告和完整性；HTTP映射见[共享策略](../src/api/sku_http.py:9)。等待超时504返回 [`task_id / query_url`](../src/api/sku_service.py:32) 和响应头 [`Location`](../src/api/sku_http.py:42)，后台继续，可查询原任务；断开不取消任务。
+
+异步提交使用 [`POST /api/v2/sku-tasks`](../src/api/queue_api.py:63)，轮询使用 [`GET /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:75)，取消使用 [`DELETE /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:81)。提交体仍仅含商品链接；鉴权仍用搜索密钥。任务结果统一为第二版业务结构，任务成功要求成功类业务状态且有效SKU非空。完整契约见 [`unified-queue.md`](unified-queue.md)。
 
 | HTTP | 场景 | 响应处理 |
 |---|---|---|
@@ -130,43 +132,52 @@ Invoke-RestMethod -Method Post `
 | 200 | source_not_applicable | 当前来源缺少字段或字段为空；这是有分类的查询结果，不表示已获取SKU |
 | 401 | 查询密钥缺失或错误 | detail中返回固定错误码 INVALID_API_KEY |
 | 422 | 非法链接、缺少字段、类型错误、额外字段 | 修正请求；不发起详情请求 |
-| 429 | 并发已满 | detail错误码 SKU_BUSY；稍后重试，不进入等待队列 |
+| 409 | 幂等键冲突或任务取消 | [`IDEMPOTENCY_CONFLICT / TASK_CANCELLED`](../src/api/sku_service.py:51)；更正提交或按需创建新任务 |
+| 429 | 共享队列容量已满 | [`QUEUE_FULL`](../src/api/sku_service.py:55)；退避后重试，并发占满但容量未满时正常排队 |
 | 502 | access_restricted、parse_failed、network_failed | 保留完整分类结果、原因及警告；风控不自动重试 |
 | 502 | 未预期异常或结果结构异常 | detail错误码 SKU_QUERY_FAILED；不回显异常原文 |
 | 503 | 无激活Cookie、密文损坏、无适用Cookie | detail错误码 COOKIE_UNAVAILABLE；由管理员检查已有会话 |
 | 503 | login_required | 保留分类结果；服务器会话被上游要求登录，不是查询密钥错误 |
 | 503 | 服务关闭中 | detail错误码 SKU_SERVICE_STOPPING |
-| 504 | 请求等待超时 | detail错误码 SKU_QUERY_TIMEOUT；后台线程结束前仍占槽 |
+| 504 | 同步等待或执行预算超时 | [`SKU_QUERY_TIMEOUT / TASK_TIMEOUT`](../src/api/sku_service.py:65)；前者后台继续，按响应查询位置获取原任务 |
 
 即使HTTP为200，也必须检查 [`status`](../src/api/sku_schemas.py:18)、[`sku_count`](../src/api/sku_schemas.py:28)和[`warnings`](../src/api/sku_schemas.py:26)。交易模型现支持已验证的规格名称；该路径按用户要求不提取图片，保留兼容响应中的空主图字段。旧重量表路径的元数据图片行为不变。
 
 ## 8. 配置和部署
 
-### 8.1 独立并发及超时
+### 8.1 统一并发、请求间隔与超时
 
-配置在[服务器设置](../src/api/config.py)中读取；不配置时使用默认值。
+配置在 [`Settings`](../src/api/config.py:56) 中读取，模板为 [`.env.example`](../.env.example)。完整范围见 [`unified-queue.md`](unified-queue.md)。
 
 | 环境变量 | 默认值 | 规则 |
-|---|---|---|
-| SKU_MAX_CONCURRENCY | 2 | 每进程1至8个查询；与图搜工作线程独立 |
-| SKU_HTTP_TIMEOUT | 20 | 每次上游请求超时秒数，大于0且不超过120 |
-| SKU_QUERY_TIMEOUT_SECONDS | 90 | HTTP查询等待秒数，有限正数 |
+|---|---:|---|
+| [`GLOBAL_WORKER_COUNT`](../src/api/config.py:145) | 1 | 三类共享任务并发，唯一调度权威 |
+| [`REQUEST_INTERVAL_MIN_SECONDS`](../src/api/config.py:146) / [`REQUEST_INTERVAL_MAX_SECONDS`](../src/api/config.py:147) | 2 / 4 | 所有实际1688请求共享随机启动间隔秒数 |
+| [`MAX_QUEUED_TASKS`](../src/api/config.py:131) | 100 | 三类排队加执行中总容量 |
+| [`RATE_LIMIT_COOLDOWN_SECONDS`](../src/api/config.py:148) | 60 | 全局限流冷却秒数 |
+| [`SKU_TASK_TIMEOUT_SECONDS`](../src/api/config.py:149) | 180 | 领取后的有效执行预算秒数 |
+| [`SKU_HTTP_TIMEOUT`](../src/api/config.py:143) | 20 | 单次上游网络超时秒数，大于0、不超过120 |
+| [`SKU_QUERY_TIMEOUT_SECONDS`](../src/api/config.py:144) | 90 | 同步HTTP入队后等待秒数，包含排队和保护等待 |
 
-- 固定最多一次网络重试，最多两次受限重定向，因此总耗时可能超过单次请求超时。
-- 使用专用线程池执行同步网络操作；准入包含Cookie加载及启动间隔等待阶段，满额立即拒绝，不建立无界队列。
-- 所有商品详情接口查询共用[启动限速器](../src/api/sku_rate_limit.py:7)，相邻查询随机间隔2～4秒启动，首个查询不等待。空闲时间计入间隔，系统调度可能使实际间隔更长；保留并发，不等待上一查询完成。等待计入HTTP查询超时，不阻塞事件循环。
-- 启动间隔按进程生效，多进程或多实例不共享计时；不改变内部网络重试、重定向规则，不影响图搜及独立命令行客户端。更新后必须重启API。
-- 客户端断开或HTTP等待超时不能杀死同步线程。操作继续占槽，直到真实结束并关闭会话。不能以取消请求绕过并发限制。
-- 正常停机先停止准入，等待已接收操作完成后关闭线程池。反向代理读取超时建议高于查询等待超时，例如默认配置下110秒。
-- 限制按进程计算；[现有启动入口](../src/run_api.py:23)使用单进程。自行增加进程数会倍增总并发。
+- 旧 [`SKU_MAX_CONCURRENCY`](../src/api/config.py:142) 及两项图搜工作池配置已弃用，仅兼容读取校验，不改变默认总并发1、不叠加额度或旧启动限速。
+- 默认最多一次网络重试、两次受限重定向；每次实际请求都需共享许可，图搜轮询及令牌刷新重试也受控，不只是限制查询启动。
+- 排队不消耗执行预算。仅任务实际在请求入口等待保护解除的时间扣除，普通间隔等待、下载和在途网络仍计入。预算耗尽不发新请求，底层操作结束前不释放名额。
+- 限流进入全局冷却，可信上游等待时间更长时至少遵守该时长；验证或登录异常持久化暂停。Cookie更新和重启不恢复，须处理原因后调用[人工恢复](../src/api/queue_api.py:98)。[队列统计](../src/api/queue_api.py:91)及恢复均用搜索密钥鉴权。
+- 同步超时或客户端断开只结束等待。排队取消立即终结；执行中取消先记标志，操作实际结束后才释放名额，迟到结果不能覆盖终态。
+- 正常关闭停止接纳和领取，保留排队任务，阻止后续请求并等待实际在途操作结束。代理读取超时建议高于同步等待超时，默认可设110秒；不是任务完成时限。
+- 只支持单进程单调度器，禁止旧消费者共跑或多实例消费。独立CLI和诊断进程不受API共享速率控制。调速不能保证避免验证码。
+
+两版同步与异步SKU支持可选 [`Idempotency-Key`](../src/api/sku_http.py:26)，长度1～255且非全空白。同一数据库全局共享键，同类型同规范化参数复用原任务，参数或类型不同409冲突；不传键则每次新建。默认终态后保留24小时，每小时清理任务、结果及幂等记录；依赖可延长保留，不删除未结束任务，不按商品地址永久缓存。
 
 ### 8.2 同步后必须重启
 
 1. 将实现、测试及文档通过正常发布流程同步到服务器，确保依赖满足[项目依赖清单](../requirements.txt)。
-2. 保留现有数据库路径、Cookie加密密钥及搜索密钥；无需新建表或再次上传已有可用Cookie。
+2. 停止旧API及全部旧消费者，备份现有SQLite和原Cookie加密密钥；保留数据库路径及两类接口密钥。新进程启动自动建统一队列表并迁移旧ID、结果、依赖及取消标记，无需重新上传仍有效的Cookie。禁止新旧消费者共跑。
 3. **git同步代码后必须重启实际API服务进程，路由才会注册。只同步文件不会让运行中的服务自动增加接口。** 使用现有进程管理器重启原服务；手动启动时先停止原进程，再通过Python运行[启动入口](../src/run_api.py)。不要另起重复占用端口的进程。
 4. 确认反向代理允许新路径POST，读取超时符合上述配置。重启后在站点 /docs 或 /openapi.json 确认出现 /api/v1/product-skus。
 5. 由用户使用第7节本地密钥示例发起实际查询，并区分SKU数据、风控、登录和数据源不适用结果。
+
+异常重启将未取消的执行中任务恢复排队，已请求取消的未结束任务恢复取消。至少一次执行意味着上游已完成而终态未落库时可能重复请求，幂等提交不能消除这个边界。升级核对流程见 [`unified-queue.md`](unified-queue.md)。
 
 本轮没有执行git提交、推送、服务器部署或重启，也没有请求上述线上网站或1688商品。
 

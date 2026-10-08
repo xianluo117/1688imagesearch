@@ -240,18 +240,20 @@ SKU 查询、价格口径和 v1/v2 兼容说明见 [`docs/merchant-sku-api.md`](
 
 ### 11.1 架构
 
-API 使用 FastAPI、SQLite、2 个上传 Worker 和 2 个商品 Worker：
+API 使用 FastAPI、SQLite 和单进程统一调度器。图片上传、图搜商品查询、两版同步及异步 SKU 共用队列：默认全局任务并发 1、实际 1688 请求随机间隔 2～4 秒、排队加执行总容量 100。完整配置、SKU 异步路由、幂等、状态恢复和停机迁移见 [`docs/unified-queue.md`](docs/unified-queue.md)。
 
 - Cookie 加密保存在 SQLite。
 
 API Cookie 默认存储在 [data/image-search.db](data/image-search.db) 的 [cookie_versions 表](src/api/database.py)，可用 [DATABASE_PATH 配置](src/api/config.py:108)覆写；此处是默认值，不代表已确认部署实际路径。独立命令行的 Cookie 文件参数读取指定文件，浏览器下载的 Cookie JSON 是人工备份，不是 API 活动存储。备份或迁移 API 时同时保留数据库及原 [COOKIE_ENCRYPTION_KEY](src/api/config.py)，否则无法解密；不要输出或提交密钥。
-- 上传任务和商品任务独立持久化，状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。
-- 上传成功后立即保存 `image_id` 和官方搜索页 URL，不自动创建商品任务。
+- 三类任务统一持久化，使用相同的[五类任务状态](src/api/queue_store.py:22)，业务结果分别保留。
+- 上传成功后保存图片标识和官方搜索页 URL，不自动创建商品任务。
 - 商品任务显式引用成功的上传任务，并使用上传时绑定的 Cookie 版本。
-- 每个任务创建独立的 Chrome 指纹会话。
-- 服务重启后，未取消的 `running` 任务恢复为 `queued`，已请求取消的任务恢复为 `cancelled`。
+- 每个任务使用独立会话；轮询、重试、令牌刷新和重定向也需共享请求许可。
+- 异常重启后，未取消的执行中任务恢复排队，已请求取消的未结束任务恢复取消；上游已完成但本地未落库时可能重复请求，属于至少一次执行。
+- 限流默认全局冷却 60 秒；验证或登录异常持久化暂停。更新 Cookie 或重启不解除暂停，须处理原因后调用[人工恢复接口](src/api/queue_api.py:98)。调速不能保证避免验证码。
+- 同步 SKU 入队后默认等待 90 秒；504 返回[任务编号及查询位置](src/api/sku_service.py:29)，后台继续，客户端断开不取消任务。
 
-必须使用单个 Uvicorn 进程。不要配置多个 Uvicorn 或 Gunicorn Worker。
+必须使用单个 Uvicorn 进程。升级先停旧消费者，备份数据库和原加密密钥，再启动一个新调度器自动迁移；保留旧任务 ID、结果、依赖和取消记录。禁止新旧消费者共跑，不配置多个 Uvicorn/Gunicorn 工作进程或多实例共享消费。
 
 ### 11.2 初始化配置
 
@@ -287,23 +289,31 @@ cat .env
 
 API 启动时会自动加载项目根目录 `.env`。系统环境变量优先级高于 `.env`，生产环境也可以通过 systemd、Docker 或 Shell 注入配置。
 
-可选参数：
+可选参数（范围及生命周期见 [`docs/unified-queue.md`](docs/unified-queue.md)）：
 
-| 变量                           |    默认值 | 说明                        |
-| ------------------------------ | --------: | --------------------------- |
-| `UPLOAD_WORKER_COUNT`          |       `2` | 上传 Worker 数，范围 1 到 2 |
-| `PRODUCT_WORKER_COUNT`         |       `2` | 商品 Worker 数，范围 1 到 2 |
-| `MAX_QUEUED_TASKS`             |     `100` | 每类排队和执行任务总上限    |
-| `UPLOAD_TASK_TIMEOUT_SECONDS`  |     `240` | 上传任务总超时              |
-| `PRODUCT_TASK_TIMEOUT_SECONDS` |     `180` | 商品任务总超时              |
-| `TASK_RETENTION_SECONDS`       |   `86400` | 终态任务保留秒数            |
-| `DOWNLOAD_CONNECT_TIMEOUT`     |      `10` | 图片连接超时                |
-| `DOWNLOAD_TIMEOUT`             |      `30` | 图片下载总超时              |
-| `MAX_IMAGE_BYTES`              | `8388608` | 远程图片最大字节数          |
-| `SEARCH_HTTP_TIMEOUT`          |      `90` | 单次 MTOP HTTP 请求超时     |
-| `SEARCH_NETWORK_RETRIES`       |       `1` | MTOP 网络重试次数           |
-| `SEARCH_READY_RETRIES`         |       `8` | 商品首屏就绪重试次数        |
-| `SEARCH_READY_INTERVAL`        |     `1.5` | 商品首屏重试间隔秒数        |
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| [`GLOBAL_WORKER_COUNT`](src/api/config.py:145) | 1 | 三类共享任务并发，唯一权威 |
+| [`REQUEST_INTERVAL_MIN_SECONDS`](src/api/config.py:146) / [`REQUEST_INTERVAL_MAX_SECONDS`](src/api/config.py:147) | 2 / 4 | 所有实际 1688 请求的随机启动间隔秒数 |
+| [`RATE_LIMIT_COOLDOWN_SECONDS`](src/api/config.py:148) | 60 | 全局限流冷却秒数，上游要求更长则遵守上游 |
+| [`MAX_QUEUED_TASKS`](src/api/config.py:131) | 100 | 三类排队和执行中合计上限 |
+| [`UPLOAD_TASK_TIMEOUT_SECONDS`](src/api/config.py:132) | 240 | 上传有效执行预算秒数 |
+| [`PRODUCT_TASK_TIMEOUT_SECONDS`](src/api/config.py:133) | 180 | 图搜有效执行预算秒数 |
+| [`SKU_TASK_TIMEOUT_SECONDS`](src/api/config.py:149) | 180 | SKU 有效执行预算秒数 |
+| [`SKU_QUERY_TIMEOUT_SECONDS`](src/api/config.py:144) | 90 | 同步 SKU 入队后 HTTP 等待秒数 |
+| [`SKU_HTTP_TIMEOUT`](src/api/config.py:143) | 20 | 单次 SKU 网络超时秒数 |
+| [`TASK_RETENTION_SECONDS`](src/api/config.py:134) | 86400 | 终态后保留秒数；结果和幂等键随任务清理 |
+| [`DOWNLOAD_CONNECT_TIMEOUT`](src/api/config.py:135) | 10 | 图片连接超时秒数 |
+| [`DOWNLOAD_TIMEOUT`](src/api/config.py:136) | 30 | 图片下载总超时秒数 |
+| [`MAX_IMAGE_BYTES`](src/api/config.py:137) | 8388608 | 远程图片最大字节数 |
+| [`SEARCH_HTTP_TIMEOUT`](src/api/config.py:138) | 90 | 单次 MTOP 网络超时秒数 |
+| [`SEARCH_NETWORK_RETRIES`](src/api/config.py:139) | 1 | MTOP 网络重试次数 |
+| [`SEARCH_READY_RETRIES`](src/api/config.py:140) | 8 | 商品首屏就绪重试次数 |
+| [`SEARCH_READY_INTERVAL`](src/api/config.py:141) | 1.5 | 首屏重试退避秒数，同时满足共享请求间隔 |
+
+旧 [`UPLOAD_WORKER_COUNT`](src/api/config.py:129)、[`PRODUCT_WORKER_COUNT`](src/api/config.py:130)、[`SKU_MAX_CONCURRENCY`](src/api/config.py:142) 已弃用，仅兼容读取和校验；不改变全局默认并发 1、不叠加额度或限速，建议移除。
+
+排队不消耗执行预算；只有实际在请求入口等待暂停或冷却的时间扣除，普通间隔、下载和在途网络仍计入。取消、执行超时或关闭均等待底层操作结束后释放名额，不等同于同步 HTTP 等待结束。
 
 ### 11.3 启动
 

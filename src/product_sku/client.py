@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from curl_cffi import requests
+from requests import RequestException
+from request_control import RequestControl, control_scope, disable_transport_retries, notify
 from image_search.cookies import ImportedCookie, load_cookie_records
 
 from .extraction import MAX_BYTES
@@ -18,7 +20,8 @@ class ProductSkuClient:
     def __init__(self, cookie_file: str | Path | None = None, *,
                  cookie_records: list[ImportedCookie] | None = None,
                  session: Any | None = None, timeout: float = 20,
-                 network_retries: int = 1, max_bytes: int = MAX_BYTES):
+                 network_retries: int = 1, max_bytes: int = MAX_BYTES,
+                 request_control: RequestControl | None = None):
         if (cookie_file is None) == (cookie_records is None):
             raise ValueError("provide_exactly_one_cookie_source")
         if not math.isfinite(timeout) or not 0 < timeout <= 120:
@@ -41,6 +44,8 @@ class ProductSkuClient:
             if self._owned:
                 self.session.close()
             raise ValueError("cookie_session_setup_failed") from None
+        self.request_control = request_control
+        disable_transport_retries(self.session)
         self.timeout = timeout
         self.network_retries = network_retries
         self.max_bytes = max_bytes
@@ -58,6 +63,12 @@ class ProductSkuClient:
         self._closed = True
 
     def fetch(self, url: str) -> SkuResult:
+        with control_scope():
+            result = self._fetch(url)
+            notify(self.request_control, "observe_result", result)
+            return result
+
+    def _fetch(self, url: str) -> SkuResult:
         product_id, canonical = normalize_url(url)
         if self._closed:
             raise ValueError("client_closed")
@@ -71,12 +82,14 @@ class ProductSkuClient:
         while True:
             response = None
             retry = False
+            notify(self.request_control, "before_request")
             try:
                 response = self.session.get(
                     current, allow_redirects=False, stream=True, timeout=self.timeout,
                     headers={"Accept": "text/html,application/xhtml+xml",
                              "Accept-Language": "zh-CN,zh;q=0.9"},
                 )
+                notify(self.request_control, "observe_response", response)
                 code = response.status_code
                 final_address = str(getattr(response, "url", "") or current)
                 status = address_status(final_address)
@@ -129,7 +142,8 @@ class ProductSkuClient:
                         except UnicodeDecodeError:
                             return failure("parse_failed", "invalid_encoding")
                     return parse_detail(text, canonical)
-            except requests.RequestsError:
+            except (requests.RequestsError, RequestException) as exc:
+                notify(self.request_control, "observe_error", exc)
                 retry = True
             finally:
                 if response is not None:

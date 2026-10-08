@@ -40,8 +40,8 @@ def _positive_float(name: str, default: float) -> float:
         value = float(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{name} 必须是数字") from exc
-    if value <= 0:
-        raise ConfigurationError(f"{name} 必须大于 0")
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigurationError(f"{name} 必须为有限正数")
     return value
 
 
@@ -58,6 +58,7 @@ class Settings:
     search_api_key: str
     cookie_encryption_key: str
     database_path: Path
+    # Deprecated compatibility fields; never determine unified execution capacity.
     upload_worker_count: int = 2
     product_worker_count: int = 2
     max_queued_tasks: int = 100
@@ -71,11 +72,30 @@ class Settings:
     search_network_retries: int = 1
     search_ready_retries: int = 8
     search_ready_interval: float = 1.5
-    sku_max_concurrency: int = 2
+    sku_max_concurrency: int = 2  # Deprecated; unified scheduler ignores this value.
     sku_http_timeout: float = 20.0
     sku_query_timeout_seconds: float = 90.0
+    global_worker_count: int = 1
+    request_interval_min_seconds: float = 2.0
+    request_interval_max_seconds: float = 4.0
+    rate_limit_cooldown_seconds: float = 60.0
+    sku_task_timeout_seconds: float = 180.0
 
     def __post_init__(self) -> None:
+        for name, upper in (("global_worker_count", 32), ("max_queued_tasks", 100000)):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= upper:
+                raise ConfigurationError(f"{name} 必须为 1 到 {upper} 之间的整数")
+        for name, upper in (
+            ("request_interval_min_seconds", 3600), ("request_interval_max_seconds", 3600),
+            ("rate_limit_cooldown_seconds", 86400), ("sku_task_timeout_seconds", 86400),
+            ("upload_task_timeout_seconds", 86400), ("product_task_timeout_seconds", 86400),
+        ):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= upper:
+                raise ConfigurationError(f"{name} 必须为大于 0 且不超过 {upper} 的有限数值")
+        if self.request_interval_min_seconds > self.request_interval_max_seconds:
+            raise ConfigurationError("request_interval_min_seconds 不能大于 request_interval_max_seconds")
         if type(self.sku_max_concurrency) is not int or not 1 <= self.sku_max_concurrency <= 8:
             raise ConfigurationError("sku_max_concurrency 必须在 1 到 8 之间")
         if not math.isfinite(self.sku_http_timeout) or not 0 < self.sku_http_timeout <= 120:
@@ -122,4 +142,9 @@ class Settings:
             sku_max_concurrency=_positive_int("SKU_MAX_CONCURRENCY", 2),
             sku_http_timeout=_positive_float("SKU_HTTP_TIMEOUT", 20.0),
             sku_query_timeout_seconds=_positive_float("SKU_QUERY_TIMEOUT_SECONDS", 90.0),
+            global_worker_count=_positive_int("GLOBAL_WORKER_COUNT", 1),
+            request_interval_min_seconds=_positive_float("REQUEST_INTERVAL_MIN_SECONDS", 2.0),
+            request_interval_max_seconds=_positive_float("REQUEST_INTERVAL_MAX_SECONDS", 4.0),
+            rate_limit_cooldown_seconds=_positive_float("RATE_LIMIT_COOLDOWN_SECONDS", 60.0),
+            sku_task_timeout_seconds=_positive_float("SKU_TASK_TIMEOUT_SECONDS", 180.0),
         )

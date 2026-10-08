@@ -42,10 +42,9 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         # Exercise real startup/stop without permitting graph-search workers to
         # make network requests, even if a regression accidentally creates tasks.
         self.patches = [
-            patch.object(self.app.state.upload_workers, "start", AsyncMock()),
-            patch.object(self.app.state.product_workers, "start", AsyncMock()),
-            patch("api.sku_service.QueryStartLimiter.wait"),
-            patch("api.sku_service.ProductSkuClient"),
+            patch("api.worker.download_image", AsyncMock(side_effect=AssertionError("unexpected download"))),
+            patch("api.worker.ImageSearchClient", side_effect=AssertionError("unexpected image query")),
+            patch("api.worker.ProductSkuClient"),
         ]
         for p in self.patches:
             value = p.start()
@@ -263,6 +262,7 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["warnings"], ["fixed_warning"])
             self.assertEqual(response.json()["sizes"], [])
             self.assertEqual(response.json()["color_sizes"], [])
+            await self.app.state.scheduler.resume()
 
     async def test_unusable_cookie_constructor_and_exception_redaction(self):
         await self.save_cookie()
@@ -291,12 +291,13 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_busy_cancel_keeps_slot_until_thread_and_session_finish(self):
         await self.save_cookie()
+        self.app.state.database.queue_capacity = 1
         started = self.block_fetch()
         first = asyncio.create_task(self.post())
         await self.wait_for(started.is_set)
         busy = await self.post()
         self.assertEqual(busy.status_code, 429)
-        self.assertEqual(busy.json()["detail"]["code"], "SKU_BUSY")
+        self.assertEqual(busy.json()["detail"]["code"], "QUEUE_FULL")
         # The event loop remains usable while the network worker is blocked.
         self.assertEqual((await self.client.get("/health")).status_code, 200)
         first.cancel()
@@ -306,12 +307,13 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         self.fake.__exit__.assert_not_called()
         self.assertEqual(self.factory.call_count, 1)
         self.release.set()
-        await self.wait_for(lambda: not self.app.state.sku_service._jobs)
+        await self.wait_for(lambda: not self.app.state.scheduler._jobs)
         self.fake.__exit__.assert_called_once()
         self.assertEqual((await self.post()).status_code, 200)
 
     async def test_timeout_keeps_slot_and_shutdown_drains_thread(self):
         await self.save_cookie()
+        self.app.state.database.queue_capacity = 1
         self.app.state.sku_service.settings = replace(self.settings, sku_query_timeout_seconds=0.05)
         started = self.block_fetch()
         first = asyncio.create_task(self.post())
@@ -319,7 +321,7 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         response = await first
         self.assertEqual(response.status_code, 504)
         self.assertEqual((await self.post()).status_code, 429)
-        stop = asyncio.create_task(self.app.state.sku_service.stop())
+        stop = asyncio.create_task(self.app.state.scheduler.stop())
         await asyncio.sleep(0.02)
         self.assertFalse(stop.done())
         self.assertEqual((await self.post()).status_code, 503)
@@ -327,32 +329,22 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(stop, 3)
         self.fake.__exit__.assert_called_once()
 
-    async def test_start_wait_keeps_slot_and_timeout_drains_before_shutdown(self):
+    async def test_paused_queue_wait_timeout_preserves_task(self):
         await self.save_cookie()
         service = self.app.state.sku_service
         service.settings = replace(self.settings, sku_query_timeout_seconds=0.05)
-        waiting = threading.Event()
-
-        def wait_for_start():
-            waiting.set()
-            if not self.release.wait(5):
-                raise RuntimeError("test release timeout")
-
-        with patch.object(service._start_limiter, "wait", side_effect=wait_for_start):
-            first = asyncio.create_task(self.post())
-            await self.wait_for(waiting.is_set)
-            self.fake.fetch.assert_not_called()
-            self.assertEqual((await self.client.get("/health")).status_code, 200)
-            self.assertEqual((await self.post()).status_code, 429)
-            response = await first
-            self.assertEqual(response.status_code, 504)
-            self.assertEqual((await self.post()).status_code, 429)
-            stop = asyncio.create_task(service.stop())
-            await asyncio.sleep(0.02)
-            self.assertFalse(stop.done())
-            self.assertEqual((await self.post()).status_code, 503)
-            self.release.set()
-            await asyncio.wait_for(stop, 3)
+        await self.app.state.database.pause_scheduler("manual_test")
+        response = await self.post()
+        self.assertEqual(response.status_code, 504)
+        task_id = response.json()["detail"]["task_id"]
+        self.assertEqual(response.headers["location"], response.json()["detail"]["query_url"])
+        task = await self.app.state.database.get_queue_task(task_id)
+        self.assertEqual(task.status, "queued")
+        self.assertFalse(task.cancel_requested)
+        self.fake.fetch.assert_not_called()
+        await self.app.state.scheduler.resume()
+        task = await self.app.state.scheduler.wait_for_task(task_id, timeout=3)
+        self.assertEqual(task.status, "succeeded")
         self.fake.fetch.assert_called_once_with(URL)
         self.fake.__exit__.assert_called_once()
 

@@ -21,13 +21,13 @@ class ProductTaskCreate(BaseModel):
 
 class UploadTaskCreated(BaseModel):
     task_id: str
-    status: Literal["queued"]
+    status: TaskStatus
 
 
 class ProductTaskCreated(BaseModel):
     task_id: str
     upload_task_id: str
-    status: Literal["queued"]
+    status: TaskStatus
 
 
 class UploadResultPayload(BaseModel):
@@ -51,6 +51,8 @@ class ProductSearchResultPayload(BaseModel):
 
 
 class UploadTaskStatusResponse(BaseModel):
+    scheduler: dict[str, Any]
+    cancel_requested: bool = False
     task_id: str
     status: TaskStatus
     created_at: float
@@ -62,6 +64,8 @@ class UploadTaskStatusResponse(BaseModel):
 
 
 class ProductTaskStatusResponse(BaseModel):
+    scheduler: dict[str, Any]
+    cancel_requested: bool = False
     task_id: str
     upload_task_id: str
     status: TaskStatus
@@ -90,6 +94,8 @@ class HealthResponse(BaseModel):
 
 class DetailedHealthResponse(BaseModel):
     status: Literal["ok"]
+    global_workers: int
+    queue: dict[str, Any]
     cookie: dict[str, Any]
     upload_workers: int
     product_workers: int

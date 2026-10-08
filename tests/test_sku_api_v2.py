@@ -102,49 +102,42 @@ class ProductSkuApiV2Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shared_concurrency_across_versions(self):
         await self.save_cookie()
+        self.app.state.database.queue_capacity = 1
         started = self.block_fetch()
         first = asyncio.create_task(self.post(path=V1))
         await self.wait_for(started.is_set)
         response = await self.post()
         self.assertEqual(response.status_code, 429)
-        self.assertEqual(response.json()["detail"]["code"], "SKU_BUSY")
+        self.assertEqual(response.json()["detail"]["code"], "QUEUE_FULL")
         self.release.set()
         self.assertEqual((await first).status_code, 200)
         self.fake.fetch.assert_called_once()
-        await self.wait_for(lambda: not self.app.state.sku_service._jobs)
+        await self.wait_for(lambda: not self.app.state.scheduler._jobs)
         self.assertEqual((await self.post()).status_code, 200)
         self.assertEqual(self.fake.fetch.call_count, 2)
 
-    async def test_shared_start_limiter_timeout_and_stop(self):
+    async def test_shared_queue_timeout_and_resume(self):
         await self.save_cookie()
         service = self.app.state.sku_service
         service.settings = replace(self.settings, sku_query_timeout_seconds=0.05)
-        import threading
-        waiting = threading.Event()
-
-        def wait():
-            waiting.set()
-            if not self.release.wait(5):
-                raise RuntimeError("test release timeout")
-
-        with patch.object(service._start_limiter, "wait", side_effect=wait) as limiter:
-            first = asyncio.create_task(self.post())
-            await self.wait_for(waiting.is_set)
-            self.fake.fetch.assert_not_called()
-            self.assertEqual((await self.post(path=V1)).status_code, 429)
-            timed_out = await first
-            self.assertEqual(timed_out.status_code, 504)
-            self.assertEqual(timed_out.json()["detail"]["code"], "SKU_QUERY_TIMEOUT")
-            self.assertEqual((await self.post()).status_code, 429)
-            stop = asyncio.create_task(service.stop())
-            await asyncio.sleep(0.01)
-            self.assertFalse(stop.done())
-            self.assertEqual((await self.post()).status_code, 503)
-            self.release.set()
-            await asyncio.wait_for(stop, 3)
-            limiter.assert_called_once()
-        self.fake.fetch.assert_called_once_with(fixtures.URL)
-        self.fake.__exit__.assert_called_once()
+        await self.app.state.database.pause_scheduler("test_pause")
+        task_ids = []
+        for path in (V1, V2):
+            response = await self.post(path=path)
+            self.assertEqual(response.status_code, 504)
+            detail = response.json()["detail"]
+            self.assertEqual(detail["code"], "SKU_QUERY_TIMEOUT")
+            self.assertEqual(response.headers["location"], detail["query_url"])
+            task_ids.append(detail["task_id"])
+        self.assertNotEqual(*task_ids)
+        self.fake.fetch.assert_not_called()
+        await self.app.state.scheduler.resume()
+        for task_id in task_ids:
+            task = await self.app.state.scheduler.wait_for_task(task_id, timeout=3)
+            self.assertEqual(task.status, "succeeded")
+        self.assertEqual(self.fake.fetch.call_count, 2)
+        self.assertFalse(hasattr(service, "_start_limiter"))
+        self.assertFalse(hasattr(service, "_executor"))
 
     async def test_both_http_versions_ceil_prices_without_mutation(self):
         from test_sku_price_presentation import CASES
