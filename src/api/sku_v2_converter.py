@@ -3,7 +3,7 @@ import re
 from decimal import Decimal
 
 from product_sku.models import Sku, SkuResult, Specification
-from product_sku.size_summary import COLOR_NAMES, SIZE_NAMES, summarize_sizes
+from product_sku.size_summary import COLOR_NAMES, SIZE_NAMES, summarize_sizes_with_sources
 from product_sku.specification_images import safe_image_url
 
 from .sku_price_presentation import present_price
@@ -94,14 +94,14 @@ def convert_result(result: SkuResult) -> ProductSkuResponseV2:
             candidates.update(image_candidates.get(identity, {None}))
         option.image_url = next(iter(candidates)) if len(candidates) == 1 else None
 
-    sizes, color_sizes = summarize_sizes(result.skus)
+    sizes, color_sizes, sources = summarize_sizes_with_sources(result.skus)
     size_dimensions = []
-    for size in sizes:
+    for size, originals in zip(sizes, sources):
         key = (size.position, size.field, size.name)
         dimension = dimensions[key]
         size_dimensions.append(SizeDimensionV2(
             dimension_id=dimension.dimension_id, name=size.name, values=size.values,
-            option_ids=[options[(key, value)].option_id for value in size.values],
+            option_ids=[options[(key, value)].option_id for value in originals],
         ))
     by_color = []
     for group in color_sizes:
@@ -114,7 +114,8 @@ def convert_result(result: SkuResult) -> ProductSkuResponseV2:
     return ProductSkuResponseV2(
         status=result.status,
         data=DataV2(
-            product=ProductV2(id=result.product_id, url=result.canonical_url, main_image=result.main_image),
+            product=ProductV2(id=result.product_id, url=result.canonical_url,
+                              main_image=result.main_image, main_images=result.main_images),
             seller=SellerV2(user_id=result.seller_user_id, member_id=result.seller_member_id),
             specifications=list(dimensions.values()),
             size_summary=SizeSummaryV2(dimensions=size_dimensions, by_color=by_color),

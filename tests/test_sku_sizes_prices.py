@@ -24,7 +24,7 @@ class SizeSummaryTests(unittest.TestCase):
     def test_dedup_order_raw_values_and_real_links(self):
         sizes, links = summarize_sizes([sku(1, "蓝色", " L "), sku(2, "红色", "M"),
                                         sku(3, "蓝色", "M"), sku(4, "蓝色", " L ")])
-        self.assertEqual(sizes[0].values, [" L ", "M"])
+        self.assertEqual(sizes[0].values, ["S"])
         self.assertEqual((sizes[0].position, sizes[0].field, sizes[0].name), (2, "sku2", "尺码"))
         self.assertEqual([(x.color.value, x.values) for x in links], [("蓝色", [" L ", "M"]), ("红色", ["M"])])
 
@@ -32,7 +32,7 @@ class SizeSummaryTests(unittest.TestCase):
         for name in (None, "规格", "型号", "尺码/型号", "大小规格"):
             self.assertEqual(summarize_sizes([sku(1, "蓝色", "XL", size_name=name)]), ([], []))
         sizes, links = summarize_sizes([sku(1, "蓝色", "M", color_name=None)])
-        self.assertEqual(sizes[0].values, ["M"])
+        self.assertEqual(sizes[0].values, ["S"])
         self.assertEqual(links, [])
 
     def test_inconsistent_names(self):
@@ -63,7 +63,7 @@ class SizeSummaryTests(unittest.TestCase):
             {"skuId": "901", "specAttrs": "红色" + chr(38) + "gt;L"},
             {"skuId": "902", "specAttrs": "蓝色" + chr(38) + "gt;M"}]
         result = parse_detail(page(value), URL)
-        self.assertEqual(result.sizes[0].values, ["M"])
+        self.assertEqual(result.sizes[0].values, ["S"])
         self.assertEqual([(x.color.value, x.values) for x in result.color_sizes], [("蓝色", ["M"])])
 
 

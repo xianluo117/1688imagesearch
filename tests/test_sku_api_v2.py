@@ -177,6 +177,28 @@ class ProductSkuApiV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("conflicting_sku_price", v1["warnings"])
         self.assertEqual(v1["warnings"], v2["meta"]["warnings"])
 
+    async def test_both_versions_final_sizes_keep_original_options(self):
+        from product_sku.size_summary import summarize_sizes
+        from test_size_range import row
+
+        original = fixtures.result()
+        original.skus = [row(1, "蓝", "2XL"), row(2, "蓝", "L"),
+                         row(3, "红", "L"), row(4, "红", "2XL")]
+        original.sizes, original.color_sizes = summarize_sizes(original.skus)
+        before = original.to_dict()
+        with patch.object(self.app.state.sku_service, "query", AsyncMock(return_value=original)):
+            v1_response = await self.post(path=V1)
+            v2_response = await self.post(path=V2)
+        self.assertEqual((v1_response.status_code, v2_response.status_code), (200, 200))
+        v1, v2 = v1_response.json(), v2_response.json()["data"]
+        self.assertEqual(v1["sizes"][0]["values"], ["S", "L"])
+        self.assertEqual(v2["size_summary"]["dimensions"][0]["values"], ["S", "L"])
+        self.assertEqual(v2["size_summary"]["dimensions"][0]["option_ids"], ["d2_o2", "d2_o1"])
+        self.assertEqual(v1["color_sizes"][0]["values"], ["2XL", "L"])
+        self.assertEqual(v2["size_summary"]["by_color"][0]["sizes"], ["2XL", "L"])
+        self.assertEqual([s["specifications"][1]["value"] for s in v1["skus"]], ["2XL", "L", "L", "2XL"])
+        self.assertEqual(original.to_dict(), before)
+
     async def test_openapi_nested_contract(self):
         schema = self.app.openapi()
         responses = schema["paths"][V2]["post"]["responses"]

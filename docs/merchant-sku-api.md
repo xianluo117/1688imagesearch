@@ -1,5 +1,33 @@
 # 一次查询商家 ID、规格图片 URL 与 SKU ID API
 
+## 主图列表（2026-10-14 新增）
+
+查询参数不变，同一次商品查询直接返回主图链接，不下载图片、不额外请求图片资源。
+
+| 接口 | 字段位置 |
+|---|---|
+| 第一版同步查询 | 顶层 [`main_images`](../src/api/sku_schemas.py:27) |
+| 第二版同步查询 | [`data.product.main_images`](../src/api/sku_v2_schemas.py:11) |
+| 异步任务查询 | 结果对象中的 [`data.product.main_images`](../src/api/sku_v2_schemas.py:11) |
+
+列表为按页面相册顺序去重的链接字符串，仅包含顶部主图，不包含规格图、详情图或推荐图片。无有效相册时返回空列表；历史任务缺少该字段时同样返回空列表，需新建查询取得最新图片数据。
+
+保留原 [`main_image`](../src/product_sku/models.py:60) 字段，优先使用已绑定当前商品的元数据主图，缺失时使用相册首图。新版商品对象的合成示例见下方；字段定义见 [`ProductV2`](../src/api/sku_v2_schemas.py:7)。
+
+```json
+{
+  "id": "123456789012",
+  "url": "https://detail.1688.com/offer/123456789012.html",
+  "main_image": "https://img.example/main-1.jpg",
+  "main_images": [
+    "https://img.example/main-1.jpg",
+    "https://img.example/main-2.jpg"
+  ]
+}
+```
+
+更新代码后需重启 API 服务。本节覆盖早期示例中关于主图始终为空的历史说明，详情图片列表不在本次扩展范围。
+
 ## 1. 用途与标识说明
 
 **新接入推荐调用一次 [POST /api/v2/product-skus](../src/api/sku_v2.py:13)，提交一个1688商品详情链接，即在同一个响应中返回商家ID、规格图片URL和SKU ID。无需分别调用商家、图片或规格接口，也不需要额外开启参数。** [第一版接口](../src/api/sku.py:18)继续保留，不自动改变已有客户端的响应结构。
@@ -23,7 +51,7 @@
 | 商家会员ID | 顶层 [`seller_member_id`](../src/api/sku_schemas.py:30) |
 | SKU ID | [`skus`](../src/api/sku_schemas.py:25) 数组内每条记录的 [`sku_id`](../src/product_sku/models.py:16) |
 | 规格图片URL | 顶层 [`specification_images`](../src/api/sku_schemas.py:31) 数组内的 [`image_url`](../src/product_sku/models.py:50) |
-| 去重尺码 | 顶层 [`sizes`](../src/api/sku_schemas.py:32)，按维度分组 |
+| 最终尺码范围 | 顶层 [`sizes`](../src/api/sku_schemas.py:32)，按维度分组，交集、排序后滑档 |
 | 每种颜色对应尺码 | 顶层 [`color_sizes`](../src/api/sku_schemas.py:33)，只关联真实返回组合 |
 | 逐SKU价格 | [`price`](../src/product_sku/models.py:21) 与 [`currency`](../src/product_sku/models.py:22)，有可信报价时非空，缺失时为空 |
 
@@ -102,7 +130,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
     {"position": 2, "field": "sku2", "name": "尺码", "value": "L", "image_url": null}
   ],
   "sizes": [
-    {"position": 2, "field": "sku2", "name": "尺码", "values": ["M", "L"]}
+    {"position": 2, "field": "sku2", "name": "尺码", "values": ["S", "M"]}
   ],
   "color_sizes": [
     {
@@ -157,7 +185,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 | [`seller_member_id`](../src/api/sku_schemas.py:30) | 字符串或空值 | 卖家会员ID，保留大小写 |
 | [`skus`](../src/api/sku_schemas.py:25) | 数组 | 当前解析得到的有效SKU |
 | [`specification_images`](../src/api/sku_schemas.py:31) | 数组 | 同一次查询返回的去重规格选项及可空图片URL，见第3.3节 |
-| [`sizes`](../src/api/sku_schemas.py:32) | 数组 | 按明确尺码维度去重的原始值，见第3.4节；无法识别或没有有效SKU时为空数组 |
+| [`sizes`](../src/api/sku_schemas.py:32) | 数组 | 按明确尺码维度计算的最终范围，见第3.4节；无法识别或没有有效尺码时为空数组；交集为空时保留维度、值列表为空 |
 | [`color_sizes`](../src/api/sku_schemas.py:33) | 数组 | 颜色选项与尺码维度的真实组合关联，见第3.4节；歧义时为空数组 |
 | [`sku_count`](../src/api/sku_schemas.py:28) | 整数 | 返回SKU数组长度，不代表平台全部SKU总数 |
 | [`status`](../src/api/sku_schemas.py:18) | 字符串 | 业务状态，见第5节 |
@@ -222,7 +250,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 
 2026-09-17独立客户端在线验证商品844515661443：同一次查询返回两类卖家ID、24个SKU，以及去重后的11个规格选项，其中3条颜色图片URL、8条尺码空值。未下载图片，日志未输出图片地址。完整离线回归87项通过。图片功能已随提交183877d推送至origin/main。**部署端必须拉取更新并重启现有API才能加载新字段，不能将代码已推送视为服务已更新。**
 
-### 3.4 去重尺码与颜色尺码关联
+### 3.4 最终尺码范围与原始颜色尺码关联
 
 字段模型见 [`SizeDimension`](../src/product_sku/models.py:28) 和 [`ColorSizes`](../src/product_sku/models.py:36)，规则见[独立汇总模块](../src/product_sku/size_summary.py:1)。
 
@@ -231,20 +259,25 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 | 尺码维度 | [`position`](../src/product_sku/models.py:29) | 整数，原规格位置 |
 | 尺码维度 | [`field`](../src/product_sku/models.py:30) | 字符串，原位置字段 |
 | 尺码维度 | [`name`](../src/product_sku/models.py:31) | 字符串，原始维度名称 |
-| 尺码维度 | [`values`](../src/product_sku/models.py:32) | 原始值字符串数组，按最终SKU出现顺序去重 |
+| 尺码维度 | [`values`](../src/product_sku/models.py:32) | 最终尺码范围：各颜色交集、大小排序、整体滑档后的字符串数组 |
 | 颜色关联 | [`color`](../src/product_sku/models.py:37) | 颜色规格对象，含原位置、字段、名称和值；结构同SKU规格项 |
 | 颜色关联 | [`size_position`](../src/product_sku/models.py:38) | 整数，对应尺码维度位置 |
 | 颜色关联 | [`size_field`](../src/product_sku/models.py:39) | 字符串，对应尺码维度字段 |
 | 颜色关联 | [`size_name`](../src/product_sku/models.py:40) | 字符串，对应原始尺码维度名称 |
 | 颜色关联 | [`values`](../src/product_sku/models.py:41) | 该颜色实际返回组合中的尺码原始值，按出现顺序去重 |
 
-- 名称仅为匹配而去掉首尾空白、忽略英文大小写；返回名称和值保持原样。
+- 维度名称仅为匹配而去掉首尾空白、忽略英文大小写；返回名称保持原样。原始SKU、规格选项、各颜色尺码和价格均不因最终范围计算而改变。
 - 尺码名称有限规则为：尺码、尺寸、大小、size；颜色名称为：颜色、色彩、color、colour。只做完整名称匹配，不按位置、规格值或部分关键词猜测。
 - “规格”“型号”“尺码/型号”等模糊名称不当作尺码。尺寸可能是长度、器物大小等，**不保证是衣服尺码**。
 - 同一位置字段的名称缺失或不一致时不识别该维度。旧重量表来源没有可信名称，两个汇总列表均为空数组。
 - 多个明确尺码维度分别汇总，不混在一个列表里；存在多个颜色或多个尺码维度时不推测配对，颜色关联为空数组。
 - 仅一个明确颜色维度和一个明确尺码维度时，按最终SKU中真实组合关联；不生成笛卡尔积、不补齐未返回组合。
-- 缺失或空白值不参加汇总；同一维度内按原始值去重，带空格的不同原始值不合并。
+- 最终范围先取各颜色尺码交集，再按标准字母码大小排序。最小标准尺码高于S时，以S=0、M=1、L=2、XL=3、2XL=4的档差整体下移；最小不高于S时不移，保留断档，不补齐尺码。交集为空时值列表为空。
+- 标准字母码忽略大小写和首尾空白，同档去重；XXL与2XL同档，最终用2XL，后续大码依此类推。XS小于S，XXS与2XS同档，最终用2XS。
+- 非标准尺码按完整原文求交集，排在标准尺码之后并保留首次出现顺序，不参与滑档。例如长度、均码及数字尺码不会被猜测为字母码。
+- 单颜色使用该颜色自身尺码；没有明确颜色维度时使用尺码维度自身。多个颜色或多个尺码维度不猜测关联，各尺码维度独立排序、滑档，不做推测的颜色交集。
+- 缺失或空白尺码不作为有效值，但已识别的颜色没有任何有效尺码时仍以空集合参与交集，不能被漏掉而扩大最终范围。各颜色原始关联仍仅保留真实有效组合，按原文去重和原出现顺序输出。
+- 示例：蓝色M/L/2XL、红色L/2XL/3XL，交集L/2XL，下移两档得到S/L；不是先分别滑档再求交集。单颜色M/L得到S/M。所有原始规格与颜色尺码保持不变。
 - 汇总仅覆盖返回SKU，不保证平台完整尺码范围，也不代表库存、可购买数量或当前可售状态。没有有效SKU时两个列表为空数组。
 
 ### 3.5 逐SKU价格口径
@@ -510,7 +543,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
     ],
     "size_summary": {
       "dimensions": [
-        {"dimension_id": "d2", "name": "尺码", "values": ["M", "L"], "option_ids": ["d2_o1", "d2_o2"]}
+        {"dimension_id": "d2", "name": "尺码", "values": ["S", "M"], "option_ids": ["d2_o1", "d2_o2"]}
       ],
       "by_color": [
         {"color_option_id": "d1_o1", "color": "蓝色", "size_dimension_id": "d2", "sizes": ["M", "L"], "size_option_ids": ["d2_o1", "d2_o2"]}
@@ -562,7 +595,9 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 - [角色](../src/api/sku_v2_schemas.py:28)只允许颜色、尺码、未知三类，分别使用 color、size、unknown。按[现有完整名称规则](../src/product_sku/size_summary.py:4)识别，不按固定位置、规格值或部分关键词猜测。名称缺失、不一致或模糊时为未知。
 - 同一原位置字段出现缺失名称和唯一明确名称时，[转换器](../src/api/sku_v2_converter.py:45)保留一个名称为空的未知维度，不拆成不合理的重复维度。多个明确名称冲突时保守分开，不强行合并；相关角色保持未知，不生成尺码或颜色配对。
 - 旧来源缺少名称和值仍保留[可空选项结构](../src/api/sku_v2_schemas.py:18)和SKU。三维或更多维时，每条SKU保留全部选项引用。多颜色或多尺码维度只保留独立尺码汇总，不猜测配对，不生成额外组合。
-- [汇总](../src/api/sku_v2_converter.py:99)直接复用最终SKU的名称识别规则，按准确维度、完整原始值映射引用。原始值不去空格、不改大小写；空白或缺失值不参与汇总。
+- [最终尺码汇总](../src/api/sku_v2_converter.py:97)与第一版使用相同的交集、排序、滑档规则，复用现有字段，不新增输出字段。内部保存滑档前来源，不使用滑档后的显示值反查选项。
+- [`option_ids`](../src/api/sku_v2_schemas.py:36)与最终显示值逐项对应，但引用的是排序后、滑档前的原始尺码选项。显示S可以引用原始L；不能将该引用理解为原选项文本也变成S。同档存在多个原始写法时引用最终SKU中首次出现的原始选项，其余原始选项仍保留。
+- [各颜色尺码](../src/api/sku_v2_schemas.py:49)保留原值、原顺序和原选项引用，不参与显示滑档。规格选项不去空格、不改大小写，SKU及价格处理不变。
 - [图片](../src/api/sku_v2_converter.py:91)按原位置、字段、名称和值完整关联，不按下标。候选冲突、缺失或无法验证时为空；名称合并后也不能借用另一身份的图片。不以商品主图回填。
 - 第二版维度[不输出原位置字段](../src/api/sku_v2_converter.py:75)，SKU也不再输出逐条规格对象或第一版独立图片列表。转换内部仍使用原字段建立身份；客户端不能把局部维度标识当成原字段，也不能仅凭位置重建冲突名称、合并身份或保证第一版往返还原。
 
@@ -576,7 +611,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 #### 读取去重尺码和颜色尺码
 
-- 全部明确尺码按 [`data.size_summary.dimensions`](../src/api/sku_v2_schemas.py:48) 分维度读取原始值；如需选项或图片，使用对应 [`option_ids`](../src/api/sku_v2_schemas.py:36) 查找上述表，必要时由 [`dimension_id`](../src/api/sku_v2_schemas.py:33) 确认维度，不把不同尺码维度混成一个列表。
+- 最终尺码范围按 [`data.size_summary.dimensions`](../src/api/sku_v2_schemas.py:48) 分维度读取显示值；如需滑档前原始选项或图片，使用对应 [`option_ids`](../src/api/sku_v2_schemas.py:36) 查找上述表，由 [`dimension_id`](../src/api/sku_v2_schemas.py:33) 确认维度。显示值与原选项文本可以不同，不把不同尺码维度混成一个列表。
 - 每种颜色对应尺码读取 [`data.size_summary.by_color`](../src/api/sku_v2_schemas.py:49)：用 [`color_option_id`](../src/api/sku_v2_schemas.py:40) 查颜色选项，用 [`size_dimension_id`](../src/api/sku_v2_schemas.py:42) 确认尺码维度，读取 [`sizes`](../src/api/sku_v2_schemas.py:43) 或对应 [`size_option_ids`](../src/api/sku_v2_schemas.py:44)。只覆盖真实返回组合，不补笛卡尔积。
 - 汇总为空不等于没有SKU或没有规格值；名称不明确、旧来源或多颜色/多尺码配对歧义时，应继续显示原规格，不自行猜测汇总。
 
@@ -668,7 +703,7 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
 | [`skus[].sku_id / spec_id`](../src/product_sku/models.py:16) | [`data.skus[].sku_id / spec_id`](../src/api/sku_v2_schemas.py:60) | 保留真实上游标识 |
 | [`skus[].specifications`](../src/product_sku/models.py:17) | [`data.skus[].option_ids`](../src/api/sku_v2_schemas.py:63) → [`data.specifications[].options`](../src/api/sku_v2_schemas.py:29) | 由引用查维度、原值与图片，不按数组下标 |
 | 顶层 [`specification_images`](../src/api/sku_schemas.py:31) | [`data.specifications[].options[].image_url`](../src/api/sku_v2_schemas.py:21) | 不再有独立图片列表；同一选项共享URL |
-| 顶层 [`sizes`](../src/api/sku_schemas.py:32) | [`data.size_summary.dimensions`](../src/api/sku_v2_schemas.py:48) | 按维度读取原值及选项引用 |
+| 顶层 [`sizes`](../src/api/sku_schemas.py:32) | [`data.size_summary.dimensions`](../src/api/sku_v2_schemas.py:48) | 按维度读取最终范围及滑档前原选项引用 |
 | 顶层 [`color_sizes`](../src/api/sku_schemas.py:33) | [`data.size_summary.by_color`](../src/api/sku_v2_schemas.py:49) | 颜色、尺码维度与选项均改为局部引用，真实组合规则不变 |
 | [`skus[].price`](../src/product_sku/models.py:21) | [`data.skus[].price.amount`](../src/api/sku_v2_schemas.py:53) | 标量变为对象中的金额，增加逐条价格状态；两版HTTP均输出向上取整整数字符串或空值 |
 | [`currency / price_source / price_basis`](../src/product_sku/models.py:22) | [`price.currency / source / basis`](../src/api/sku_v2_schemas.py:54) | 移入每条SKU价格对象；不可用时全部为空 |

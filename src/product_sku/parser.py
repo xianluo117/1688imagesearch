@@ -11,6 +11,7 @@ from .spec_ids import SpecIds
 from .prices import SkuPrices
 from .size_summary import summarize_sizes
 from .quote_sources import collect_quotes
+from .main_images import main_gallery_images
 
 FIELD = "pieceWeightScaleInfo"
 IDENTITY_KEYS = ("offerId", "productId", "itemId")
@@ -314,6 +315,8 @@ def parse_detail(text: str, url: str) -> SkuResult:
         sellers: list[dict] = []
         verified_roots: list[dict] = []
         arrays, unscoped = _arrays(roots, product_id, models, sellers, verified_roots)
+        result.main_images = main_gallery_images(verified_roots, product_id)
+        result.main_image = page.main_image(product_id) or next(iter(result.main_images), None)
         images = OptionImages()
         quotes = collect_quotes(verified_roots, product_id)
         trade_skus, trade_warnings = _trade_skus(models, product_id, images, quotes.by_sku)
@@ -351,7 +354,6 @@ def parse_detail(text: str, url: str) -> SkuResult:
             result.warnings.append("malformed_other_candidate")
         if unscoped:
             result.warnings.append("unconfirmed_other_candidate")
-        result.main_image = page.main_image(product_id)
         if result.main_image is None:
             result.warnings.append("main_image_unavailable")
         result.warnings = sorted(set(result.warnings + quotes.warnings_for(result.skus)))

@@ -1,13 +1,14 @@
 """Independent, fully typed v2 response contract; v1 request stays shared."""
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProductV2(BaseModel):
     id: str
     url: str
     main_image: str | None
+    main_images: list[str] = Field(default_factory=list)
 
 
 class SellerV2(BaseModel):

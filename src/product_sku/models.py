@@ -67,6 +67,7 @@ class SkuResult:
 
     sizes: list[SizeDimension] = field(default_factory=list)
     color_sizes: list[ColorSizes] = field(default_factory=list)
+    main_images: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

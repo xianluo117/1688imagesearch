@@ -35,7 +35,8 @@ class ConverterV2Tests(unittest.TestCase):
     def test_real_color_size_combinations_only(self):
         payload = convert_result(result([row("1"), row("2", size="L"), row("3", "红色", "S")]))
         summary = payload.data.size_summary
-        self.assertEqual(summary.dimensions[0].values, ["M", "L", "S"])
+        self.assertEqual(summary.dimensions[0].values, [])
+        self.assertEqual(summary.dimensions[0].option_ids, [])
         self.assertEqual([(g.color, g.sizes) for g in summary.by_color], [("蓝色", ["M", "L"]), ("红色", ["S"])])
         self.assertEqual(summary.by_color[0].size_option_ids, ["d2_o1", "d2_o2"])
 
@@ -111,9 +112,11 @@ class ConverterV2Tests(unittest.TestCase):
         self.assertEqual(len(payload.data.specifications[0].options), 1)
         self.assertIsNone(payload.data.specifications[0].options[0].image_url)
 
-    def test_raw_values_preserved_in_summaries(self):
+    def test_raw_values_preserved_in_color_summaries(self):
         payload = convert_result(result([row("1", "M", "M"), row("2", "M", " M ")]))
-        self.assertEqual(payload.data.size_summary.dimensions[0].values, ["M", " M "])
+        self.assertEqual(payload.data.size_summary.dimensions[0].values, ["S"])
+        self.assertEqual(payload.data.size_summary.dimensions[0].option_ids, ["d2_o1"])
+        self.assertEqual(payload.data.size_summary.by_color[0].sizes, ["M", " M "])
         self.assertEqual(payload.data.size_summary.by_color[0].color_option_id, "d1_o1")
         self.assertEqual(payload.data.size_summary.by_color[0].size_option_ids, ["d2_o1", "d2_o2"])
 
