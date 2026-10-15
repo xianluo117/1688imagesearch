@@ -116,7 +116,7 @@ def convert_result(result: SkuResult) -> ProductSkuResponseV2:
         data=DataV2(
             product=ProductV2(id=result.product_id, url=result.canonical_url,
                               main_image=result.main_image, main_images=result.main_images,
-                              title=result.title),
+                              detail_images=result.detail_images, title=result.title),
             seller=SellerV2(user_id=result.seller_user_id, member_id=result.seller_member_id),
             specifications=list(dimensions.values()),
             size_summary=SizeSummaryV2(dimensions=size_dimensions, by_color=by_color),

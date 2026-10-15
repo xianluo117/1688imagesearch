@@ -10,6 +10,7 @@ from request_control import RequestControl, control_scope, disable_transport_ret
 from image_search.cookies import ImportedCookie, load_cookie_records
 
 from .extraction import MAX_BYTES
+from .detail_images import enrich_detail_images
 from .models import SkuResult
 from .parser import parse_detail
 from .session import detail_cookie_jar
@@ -141,7 +142,10 @@ class ProductSkuClient:
                             text = body.decode("gb18030")
                         except UnicodeDecodeError:
                             return failure("parse_failed", "invalid_encoding")
-                    return parse_detail(text, canonical)
+                    result = parse_detail(text, canonical)
+                    response.close()
+                    response = None
+                    return enrich_detail_images(self, text, result)
             except (requests.RequestsError, RequestException) as exc:
                 notify(self.request_control, "observe_error", exc)
                 retry = True

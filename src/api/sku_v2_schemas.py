@@ -9,6 +9,7 @@ class ProductV2(BaseModel):
     url: str
     main_image: str | None
     main_images: list[str] = Field(default_factory=list)
+    detail_images: list[str] = Field(default_factory=list)
     title: str | None = None
 
 

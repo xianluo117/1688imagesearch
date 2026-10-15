@@ -25,6 +25,7 @@ class ProductSkuResponse(BaseModel):
     source: Literal["detail_html"]
     main_image: str | None
     main_images: list[str] = Field(default_factory=list)
+    detail_images: list[str] = Field(default_factory=list)
     skus: list[Sku]
     warnings: list[str]
     completeness: Literal["unknown", "complete", "partial"]
