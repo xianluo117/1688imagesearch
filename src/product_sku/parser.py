@@ -12,6 +12,7 @@ from .prices import SkuPrices
 from .size_summary import summarize_sizes
 from .quote_sources import collect_quotes
 from .main_images import main_gallery_images
+from .title import product_title
 
 FIELD = "pieceWeightScaleInfo"
 IDENTITY_KEYS = ("offerId", "productId", "itemId")
@@ -315,6 +316,7 @@ def parse_detail(text: str, url: str) -> SkuResult:
         sellers: list[dict] = []
         verified_roots: list[dict] = []
         arrays, unscoped = _arrays(roots, product_id, models, sellers, verified_roots)
+        result.title = product_title(models, sellers, page, product_id)
         result.main_images = main_gallery_images(verified_roots, product_id)
         result.main_image = page.main_image(product_id) or next(iter(result.main_images), None)
         images = OptionImages()
