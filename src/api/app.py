@@ -27,6 +27,8 @@ from .schemas import (
 from .worker import TaskCleanupService
 from .queue_scheduler import UnifiedQueueScheduler
 from .queue_store import IdempotencyConflict, QueueNotAccepting
+from .console_page import CONSOLE_PAGE
+from .dingtalk import DingTalkNotifier
 from .queue_api import router as queue_router, scheduler_status
 from .queue_page import QUEUE_PAGE
 from .sku_http import idempotency_key
@@ -94,7 +96,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
     database = Database(resolved.database_path)
     cookie_store = CookieStore(database, resolved.cookie_encryption_key)
-    scheduler = UnifiedQueueScheduler(database, cookie_store, resolved)
+    notifier = DingTalkNotifier(database)
+    scheduler = UnifiedQueueScheduler(database, cookie_store, resolved, alert_callback=notifier.alert_safe)
     cleanup_service = TaskCleanupService(database, resolved)
     sku_service = ProductSkuService(cookie_store, resolved, scheduler)
 
@@ -120,6 +123,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cookie_store = cookie_store
     app.state.scheduler = scheduler
     app.state.sku_service = sku_service
+    app.state.dingtalk = notifier
     app.include_router(sku_router)
     app.include_router(sku_v2_router)
     app.include_router(queue_router)
@@ -151,6 +155,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/queue", response_class=HTMLResponse, include_in_schema=False)
     async def queue_page() -> HTMLResponse:
         return HTMLResponse(QUEUE_PAGE)
+
+    @app.get("/console", response_class=HTMLResponse, include_in_schema=False)
+    async def console_page() -> HTMLResponse:
+        return HTMLResponse(CONSOLE_PAGE)
+
+    @app.get("/api/v1/console/config")
+    async def console_config(
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, object]:
+        require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
+        config = await notifier.get_config()
+        return {"configured": config is not None, "updated_at": config.updated_at if config else None}
+
+    @app.put("/api/v1/console/config")
+    async def save_console_config(
+        body: dict[str, str],
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, object]:
+        require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
+        config = await notifier.save_config(body["access_token"], body["secret"])
+        return {"configured": True, "updated_at": config.updated_at}
+
+    @app.post("/api/v1/console/test-dingtalk")
+    async def test_dingtalk(
+        body: dict[str, str],
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, object]:
+        require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
+        await notifier.send_text(body["content"])
+        return {"sent": True}
+
+    @app.get("/api/v1/console/alerts")
+    async def console_alerts(
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> dict[str, object]:
+        require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
+        now = __import__("time").time()
+        alerts = await database.list_dingtalk_alerts()
+        for alert in alerts:
+            alert["next_allowed_at"] = alert["last_sent_at"] + notifier.dedupe_seconds
+        return {"configured": await notifier.get_config() is not None, "alerts": alerts, "now": now}
 
     @app.get("/api/v1/health", response_model=DetailedHealthResponse)
     async def detailed_health(

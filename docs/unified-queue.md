@@ -99,6 +99,7 @@ API 的图片上传、图搜商品查询、SKU 查询共用一个 SQLite 持久�
 | 操作 | 路由 | 鉴权 |
 |---|---|---|
 | 队列管理页面 | [`GET /queue`](../src/api/app.py:151) | 无路由鉴权；页面调用 API 时需要搜索密钥 |
+| 告警控制台 | [`GET /console`](../src/api/app.py:159) | 无路由鉴权；页面调用 API 时需要搜索密钥 |
 | 队列统计 | [`GET /api/v1/queue`](../src/api/queue_api.py:117) | 搜索密钥 |
 | 活跃任务列表 | [`GET /api/v1/queue/tasks`](../src/api/queue_api.py:124) | 搜索密钥 |
 | 批量取消任务 | [`POST /api/v1/queue/cancel`](../src/api/queue_api.py:133) | 搜索密钥 |
@@ -116,7 +117,13 @@ API 的图片上传、图搜商品查询、SKU 查询共用一个 SQLite 持久�
 
 [`GET /api/v1/queue/tasks`](../src/api/queue_api.py:124) 默认返回活跃任务；传入 `?status=all` 可查询保留中的所有任务。任务按统一持久化序号升序返回，不包含请求参数和业务结果。
 
-Cookie 通过 [`POST /api/v1/cookies`](../src/api/app.py:171) 更新成功后，后台仅在原状态为 `paused` 且原因是 `RISK_CONTROL` 或 `LOGIN_REQUIRED` 时自动恢复队列。`cooldown`、`normal` 以及其他暂停原因不会因 Cookie 更新自动改变，分别按冷却计时或人工恢复流程处理。
+Cookie 通过 [`POST /api/v1/cookies`](../src/api/app.py:216) 更新成功后，后台仅在原状态为 `paused` 且原因是 `RISK_CONTROL` 或 `LOGIN_REQUIRED` 时自动恢复队列。`cooldown`、`normal` 以及其他暂停原因不会因 Cookie 更新自动改变，分别按冷却计时或人工恢复流程处理。
+
+### 5.2 钉钉告警控制台
+
+打开 [`/console`](../src/api/app.py:159)，输入 `SEARCH_API_KEY` 后保存。页面可以保存钉钉自定义机器人 `access_token` 和加签 `Secret`，配置写入 SQLite；也可以发送测试文本并查看自动告警状态。
+
+自动告警覆盖 `RISK_CONTROL`、`LOGIN_REQUIRED`、`COOKIE_INVALID` 和 `MTOP_TOKEN_INVALID`。消息包含原因、任务类型、任务 ID 和错误详情；相同原因 60 分钟内只发送一次。相关接口为 [`PUT /api/v1/console/config`](../src/api/app.py:171)、[`POST /api/v1/console/test-dingtalk`](../src/api/app.py:180) 和 [`GET /api/v1/console/alerts`](../src/api/app.py:189)。
 
 全局状态与原因持久化：
 
@@ -130,7 +137,7 @@ Cookie 通过 [`POST /api/v1/cookies`](../src/api/app.py:171) 更新成功后，
 
 故障任务保留失败原因，不无限自动重试；未开始任务继续排队。已在途网络请求不会被强杀，后续请求必须再次取得许可。
 
-人工处理顺序：查看原因，在浏览器完成登录或验证，必要时上传新的有效 Cookie，再调用人工恢复接口并检查状态。**Cookie 更新和服务重启均不自动解除暂停。** 人工恢复清除保护状态，不重做终态失败任务；未解决上游原因可能再次暂停或冷却。图搜商品任务继续使用上传时绑定的 Cookie 版本，上传新 Cookie 不会改写旧依赖。
+人工处理顺序：查看原因，在浏览器完成登录或验证，必要时上传新的有效 Cookie。Cookie 更新成功后，`RISK_CONTROL` 和 `LOGIN_REQUIRED` 会自动恢复；其他暂停原因仍需调用人工恢复接口。服务重启不会自动解除暂停。人工恢复清除保护状态，不重做终态失败任务；未解决上游原因可能再次暂停或冷却。图搜商品任务继续使用上传时绑定的 Cookie 版本，上传新 Cookie 不会改写旧依赖。
 
 ## 6. 超时、取消与关闭
 

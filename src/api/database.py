@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import aiosqlite
 
+from .dingtalk import DingTalkConfig
 from .queue_schema import initialize_queue
 from .queue_store import QueueStoreMixin
 
@@ -122,8 +123,80 @@ class Database(QueueStoreMixin):
                     ON product_tasks(upload_task_id, created_at);
                 """
             )
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS dingtalk_config (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    access_token TEXT NOT NULL,
+                    secret TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS dingtalk_alerts (
+                    reason TEXT PRIMARY KEY,
+                    last_sent_at REAL NOT NULL
+                );
+                """
+            )
             db.row_factory = aiosqlite.Row
             await initialize_queue(db, now)
+
+    async def get_dingtalk_config(self) -> DingTalkConfig | None:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT access_token, secret, updated_at FROM dingtalk_config WHERE singleton=1"
+            )
+            row = await cursor.fetchone()
+        return DingTalkConfig(*row) if row else None
+
+    async def save_dingtalk_config(self, access_token: str, secret: str) -> DingTalkConfig:
+        now = time.time()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """
+                INSERT INTO dingtalk_config(singleton, access_token, secret, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    access_token=excluded.access_token,
+                    secret=excluded.secret,
+                    updated_at=excluded.updated_at
+                """,
+                (access_token, secret, now),
+            )
+            await db.commit()
+        return DingTalkConfig(access_token, secret, now)
+
+    async def claim_dingtalk_alert(self, reason: str, cutoff: float, now: float) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT last_sent_at FROM dingtalk_alerts WHERE reason=?", (reason,)
+            )
+            row = await cursor.fetchone()
+            if row and row[0] > cutoff:
+                await db.rollback()
+                return False
+            await db.execute(
+                """
+                INSERT INTO dingtalk_alerts(reason, last_sent_at) VALUES (?, ?)
+                ON CONFLICT(reason) DO UPDATE SET last_sent_at=excluded.last_sent_at
+                """,
+                (reason, now),
+            )
+            await db.commit()
+            return True
+
+    async def release_dingtalk_alert(self, reason: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("DELETE FROM dingtalk_alerts WHERE reason=?", (reason,))
+            await db.commit()
+
+    async def list_dingtalk_alerts(self) -> list[dict[str, float | str]]:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                "SELECT reason, last_sent_at FROM dingtalk_alerts ORDER BY reason"
+            )
+            rows = await cursor.fetchall()
+        return [{"reason": row[0], "last_sent_at": row[1]} for row in rows]
 
     async def store_cookie(
         self,

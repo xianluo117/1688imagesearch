@@ -24,13 +24,15 @@ class UnifiedQueueScheduler:
     """
 
     def __init__(self, database, cookie_store, settings, *, execute_sku_sync=None,
-                 task_executor=None, request_guard=None, poll_seconds: float = 0.05):
+                 task_executor=None, request_guard=None, alert_callback=None,
+                 poll_seconds: float = 0.05):
         self.database, self.settings = database, settings
         self.database.queue_capacity = settings.max_queued_tasks
         self.executor = task_executor or QueueTaskExecutor(database, cookie_store, settings)
         self.execute_sku_sync = execute_sku_sync or self.executor.sku_sync
         self.guard = request_guard or RequestGuard(database, settings)
         self.poll_seconds = poll_seconds
+        self.alert_callback = alert_callback
         self._pool = None
         self._dispatcher = None
         self._drain_task = None
@@ -140,6 +142,15 @@ class UnifiedQueueScheduler:
                 task.task_id, status="cancelled" if isinstance(failure, TaskCancelledError) else "failed",
                 error_code=code, error_message=message,
             )
+            if self.alert_callback is not None and code in {
+                "RISK_CONTROL", "LOGIN_REQUIRED", "COOKIE_INVALID", "MTOP_TOKEN_INVALID",
+            }:
+                asyncio.create_task(
+                    self.alert_callback(
+                        code, task_kind=task.kind, task_id=task.task_id, message=message,
+                    ),
+                    name=f"dingtalk-alert-{task.task_id}",
+                )
         elif task.kind == "sku":
             await self.database.complete_sku_task(task.task_id, result)
         else:
