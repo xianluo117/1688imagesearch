@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from image_search.errors import AuthenticationError, ProtocolError
 
@@ -28,6 +28,7 @@ from .worker import TaskCleanupService
 from .queue_scheduler import UnifiedQueueScheduler
 from .queue_store import IdempotencyConflict, QueueNotAccepting
 from .queue_api import router as queue_router, scheduler_status
+from .queue_page import QUEUE_PAGE
 from .sku_http import idempotency_key
 from .sku import router as sku_router
 from .sku_service import ProductSkuService
@@ -146,6 +147,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
+
+    @app.get("/queue", response_class=HTMLResponse, include_in_schema=False)
+    async def queue_page() -> HTMLResponse:
+        return HTMLResponse(QUEUE_PAGE)
 
     @app.get("/api/v1/health", response_model=DetailedHealthResponse)
     async def detailed_health(

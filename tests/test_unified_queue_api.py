@@ -270,3 +270,26 @@ class UnifiedQueueApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(replay.json()["cancel_requested"])
         await self.app.state.scheduler.resume()
         self.assertEqual((await self.poll(replay.json()["task_id"])).json()["status"], "succeeded")
+
+    async def test_queue_page_lists_active_tasks_and_batch_cancels(self):
+        await self.save_cookie()
+        await self.app.state.database.pause_scheduler("operator_check")
+        upload = await self.app.state.database.create_upload_task(
+            "https://example.com/image.jpg", max_active=10,
+        )
+        sku = (await self.submit(key="queue-page")).json()["task_id"]
+
+        listed = await self.client.get("/api/v1/queue/tasks", headers=HEADERS)
+        self.assertEqual(listed.status_code, 200)
+        tasks = listed.json()["tasks"]
+        self.assertEqual([task["task_id"] for task in tasks], [upload, sku])
+        self.assertEqual({task["status"] for task in tasks}, {"queued"})
+        self.assertEqual((await self.client.get("/queue")).status_code, 200)
+
+        cancelled = await self.client.post(
+            "/api/v1/queue/cancel", headers=HEADERS,
+            json={"task_ids": [upload, sku]},
+        )
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual([task["status"] for task in cancelled.json()["tasks"]], ["cancelled", "cancelled"])
+        self.assertEqual((await self.client.get("/api/v1/queue/tasks", headers=HEADERS)).json()["tasks"], [])

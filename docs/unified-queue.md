@@ -98,12 +98,23 @@ API 的图片上传、图搜商品查询、SKU 查询共用一个 SQLite 持久�
 
 | 操作 | 路由 | 鉴权 |
 |---|---|---|
-| 队列统计 | [`GET /api/v1/queue`](../src/api/queue_api.py:91) | 搜索密钥 |
-| 人工恢复 | [`POST /api/v1/queue/resume`](../src/api/queue_api.py:98) | 搜索密钥，无需请求体 |
-| 详细健康 | [`GET /api/v1/health`](../src/api/app.py:150) | 搜索密钥 |
+| 队列管理页面 | [`GET /queue`](../src/api/app.py:151) | 无路由鉴权；页面调用 API 时需要搜索密钥 |
+| 队列统计 | [`GET /api/v1/queue`](../src/api/queue_api.py:117) | 搜索密钥 |
+| 活跃任务列表 | [`GET /api/v1/queue/tasks`](../src/api/queue_api.py:124) | 搜索密钥 |
+| 批量取消任务 | [`POST /api/v1/queue/cancel`](../src/api/queue_api.py:133) | 搜索密钥 |
+| 人工恢复 | [`POST /api/v1/queue/resume`](../src/api/queue_api.py:144) | 搜索密钥，无需请求体 |
+| 详细健康 | [`GET /api/v1/health`](../src/api/app.py:157) | 搜索密钥 |
 | 基础存活 | [`GET /health`](../src/api/app.py:146) | 无需鉴权；不代表队列可执行 |
 
-队列响应包含 [`counts`](../src/api/queue_store.py:299) 五类任务计数、[`accepting / capacity`](../src/api/queue_store.py:303)、[`global_workers`](../src/api/queue_api.py:94) 及 [`scheduler`](../src/api/queue_store.py:304)。详细健康响应包含同类队列快照及全局并发；旧 [`upload_workers / product_workers`](../src/api/app.py:158) 固定为 0，不再代表独立工作池。
+队列响应包含 [`counts`](../src/api/queue_store.py:329) 五类任务计数、[`accepting / capacity`](../src/api/queue_store.py:333)、[`global_workers`](../src/api/queue_api.py:120) 及 [`scheduler`](../src/api/queue_store.py:334)。详细健康响应包含同类队列快照及全局并发；旧 [`upload_workers / product_workers`](../src/api/app.py:165) 固定为 0，不再代表独立工作池。
+
+### 5.1 队列管理页面
+
+打开 [`/queue`](../src/api/app.py:151)，输入搜索密钥并保存。页面每 5 秒刷新一次，默认只显示 `queued` 和 `running` 任务，可按 `upload`、`product`、`sku` 筛选。页面展示全局计数、容量、接纳状态、调度器保护状态及活跃任务摘要。
+
+勾选任务后点击“取消选中任务”调用 [`POST /api/v1/queue/cancel`](../src/api/queue_api.py:133)。排队任务立即变为 `cancelled`；执行中任务只设置 `cancel_requested`，不会强杀当前网络请求，实际操作结束后才进入终态。
+
+[`GET /api/v1/queue/tasks`](../src/api/queue_api.py:124) 默认返回活跃任务；传入 `?status=all` 可查询保留中的所有任务。任务按统一持久化序号升序返回，不包含请求参数和业务结果。
 
 全局状态与原因持久化：
 

@@ -1,6 +1,8 @@
 """Authenticated queue observability, operator recovery and asynchronous SKU API."""
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from .schemas import TaskStatus
 from .sku import _authorize
@@ -37,6 +39,30 @@ class SkuTaskResponse(BaseModel):
 
 async def scheduler_status(database) -> dict:
     return (await database.queue_snapshot())["scheduler"]
+
+
+class QueueCancelRequest(BaseModel):
+    task_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+async def queue_task_summary(task_id: str, database) -> dict | None:
+    task = await database.get_queue_task(task_id)
+    if task is None:
+        return None
+    return {
+        "seq": task.seq,
+        "task_id": task.task_id,
+        "kind": task.kind,
+        "status": task.status,
+        "dependency_id": task.dependency_id,
+        "cancel_requested": task.cancel_requested,
+        "error_code": task.error_code,
+        "error_message": task.error_message,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "started_at": task.started_at,
+        "finished_at": task.finished_at,
+    }
 
 
 async def sku_task_response(task, database) -> SkuTaskResponse:
@@ -93,6 +119,26 @@ async def queue_status(request: Request):
     snapshot = await request.app.state.scheduler.snapshot()
     snapshot["global_workers"] = request.app.state.settings.global_worker_count
     return snapshot
+
+
+@router.get("/api/v1/queue/tasks")
+async def queue_tasks(
+    request: Request,
+    status: Literal["active", "all"] = Query(default="active"),
+):
+    statuses = ("queued", "running") if status == "active" else None
+    return {"tasks": await request.app.state.database.list_queue_tasks(statuses)}
+
+
+@router.post("/api/v1/queue/cancel")
+async def cancel_queue_tasks(body: QueueCancelRequest, request: Request):
+    database = request.app.state.database
+    tasks = []
+    for task_id in body.task_ids:
+        await database.cancel_queue_task(task_id)
+        task = await queue_task_summary(task_id, database)
+        tasks.append(task or {"task_id": task_id, "status": "not_found"})
+    return {"tasks": tasks}
 
 
 @router.post("/api/v1/queue/resume")

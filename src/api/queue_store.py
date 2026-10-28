@@ -290,6 +290,37 @@ class QueueStoreMixin(SchedulerStoreMixin):
     async def queue_task_counts(self) -> dict[str, int]:
         return await self._task_counts("queue_tasks")
 
+    async def list_queue_tasks(self, statuses: tuple[TaskStatus, ...] | None = None) -> list[dict[str, Any]]:
+        """Return queue-order task summaries without exposing task payloads or results."""
+        async with self._queue_connection() as db:
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                cursor = await db.execute(
+                    f"""
+                    SELECT seq, task_id, kind, status, dependency_id, cancel_requested,
+                           error_code, error_message, created_at, updated_at, started_at, finished_at
+                    FROM queue_tasks
+                    WHERE status IN ({placeholders})
+                    ORDER BY seq
+                    """,
+                    statuses,
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT seq, task_id, kind, status, dependency_id, cancel_requested,
+                           error_code, error_message, created_at, updated_at, started_at, finished_at
+                    FROM queue_tasks ORDER BY seq
+                    """
+                )
+            return [
+                {
+                    **dict(row),
+                    "cancel_requested": bool(row["cancel_requested"]),
+                }
+                for row in await cursor.fetchall()
+            ]
+
     async def queue_snapshot(self) -> dict[str, Any]:
         """One transaction: counts, protection state, remaining cooldown and admission."""
         async with self._queue_connection() as db:
