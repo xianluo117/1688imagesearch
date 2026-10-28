@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -224,6 +225,39 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             json={"image_url": "https://example.com/a.jpg"},
         )
         self.assertEqual(legacy.status_code, 404)
+
+    async def test_cookie_upload_auto_resumes_only_login_or_risk_pause(self) -> None:
+        for reason in ("RISK_CONTROL", "LOGIN_REQUIRED"):
+            await self.app.state.database.pause_scheduler(reason)
+            response = await self.client.post(
+                "/api/v1/cookies",
+                headers={"X-API-Key": UPLOAD_KEY},
+                json=cookie_payload(),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            state = await self.app.state.database.get_scheduler_state()
+            self.assertEqual((state.state, state.reason), ("normal", None))
+
+        await self.app.state.database.pause_scheduler("MANUAL_CHECK")
+        response = await self.client.post(
+            "/api/v1/cookies",
+            headers={"X-API-Key": UPLOAD_KEY},
+            json=cookie_payload(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        state = await self.app.state.database.get_scheduler_state()
+        self.assertEqual((state.state, state.reason), ("paused", "MANUAL_CHECK"))
+
+        await self.app.state.database.resume_scheduler()
+        await self.app.state.database.set_cooldown("RATE_LIMITED", until=time.time() + 60)
+        response = await self.client.post(
+            "/api/v1/cookies",
+            headers={"X-API-Key": UPLOAD_KEY},
+            json=cookie_payload(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        state = await self.app.state.database.get_scheduler_state()
+        self.assertEqual(state.state, "cooldown")
 
     async def test_health_shape(self) -> None:
         response = await self.client.get(

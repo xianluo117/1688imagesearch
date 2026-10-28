@@ -116,6 +116,8 @@ API 的图片上传、图搜商品查询、SKU 查询共用一个 SQLite 持久�
 
 [`GET /api/v1/queue/tasks`](../src/api/queue_api.py:124) 默认返回活跃任务；传入 `?status=all` 可查询保留中的所有任务。任务按统一持久化序号升序返回，不包含请求参数和业务结果。
 
+Cookie 通过 [`POST /api/v1/cookies`](../src/api/app.py:171) 更新成功后，后台仅在原状态为 `paused` 且原因是 `RISK_CONTROL` 或 `LOGIN_REQUIRED` 时自动恢复队列。`cooldown`、`normal` 以及其他暂停原因不会因 Cookie 更新自动改变，分别按冷却计时或人工恢复流程处理。
+
 全局状态与原因持久化：
 
 | 状态 | 含义 |

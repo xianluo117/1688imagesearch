@@ -182,6 +182,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail={"code": "INVALID_JSON", "message": "请求体不是有效 JSON"},
             ) from exc
         metadata = await cookie_store.save(payload)
+        scheduler_state = await database.get_scheduler_state()
+        if scheduler_state.state == "paused" and scheduler_state.reason in {
+            "RISK_CONTROL", "LOGIN_REQUIRED",
+        }:
+            await scheduler.resume()
         return CookieUploadResponse(status="updated", **metadata)
 
     @app.post(
