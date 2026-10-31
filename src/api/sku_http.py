@@ -35,7 +35,11 @@ async def query_result(product_url: str, request: Request) -> SkuResult:
     key = idempotency_key(request)
     try:
         service = request.app.state.sku_service
-        return await service.query(canonical, idempotency_key=key) if key is not None else await service.query(canonical)
+        account_id = getattr(request.state, "account_id", None) or request.query_params.get("account_id")
+        kwargs = {"idempotency_key": key} if key is not None else {}
+        if account_id:
+            kwargs["account_id"] = account_id
+        return await service.query(canonical, **kwargs)
     except SkuServiceError as exc:
         raise HTTPException(
             exc.status_code, detail=exc.detail(),

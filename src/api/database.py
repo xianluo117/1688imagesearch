@@ -21,6 +21,7 @@ class UploadTaskRecord:
     task_id: str
     status: TaskStatus
     image_url: str
+    account_id: str
     cookie_version: int | None
     image_id: str | None
     search_page_url: str | None
@@ -38,6 +39,7 @@ class ProductTaskRecord:
     task_id: str
     upload_task_id: str
     status: TaskStatus
+    account_id: str
     cookie_version: int
     result: dict[str, Any] | None
     cancel_requested: bool
@@ -66,17 +68,28 @@ class Database(QueueStoreMixin):
             await db.execute("PRAGMA foreign_keys=ON")
             await db.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS accounts (
+                    account_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    last_selected_at REAL NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS cookie_versions (
                     version INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL DEFAULT 'default',
                     encrypted_payload BLOB NOT NULL,
                     cookie_count INTEGER NOT NULL,
                     exported_at TEXT,
                     uploaded_at REAL NOT NULL,
-                    is_active INTEGER NOT NULL DEFAULT 1
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY(account_id) REFERENCES accounts(account_id)
                 );
 
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_cookie_active
-                    ON cookie_versions(is_active) WHERE is_active = 1;
+                INSERT OR IGNORE INTO accounts(account_id, display_name, enabled, created_at, updated_at)
+                    VALUES ('default', '默认账号', 1, 0, 0);
 
                 DROP TABLE IF EXISTS search_tasks;
 
@@ -84,6 +97,7 @@ class Database(QueueStoreMixin):
                     task_id TEXT PRIMARY KEY,
                     status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','cancelled')),
                     image_url TEXT NOT NULL,
+                    account_id TEXT NOT NULL DEFAULT 'default',
                     cookie_version INTEGER,
                     image_id TEXT,
                     search_page_url TEXT,
@@ -104,6 +118,7 @@ class Database(QueueStoreMixin):
                     task_id TEXT PRIMARY KEY,
                     upload_task_id TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','cancelled')),
+                    account_id TEXT NOT NULL DEFAULT 'default',
                     cookie_version INTEGER NOT NULL,
                     result_json TEXT,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +138,26 @@ class Database(QueueStoreMixin):
                     ON product_tasks(upload_task_id, created_at);
                 """
             )
+            for table in ("upload_tasks", "product_tasks"):
+                cursor = await db.execute(f"PRAGMA table_info({table})")
+                columns = {row[1] for row in await cursor.fetchall()}
+                if "account_id" not in columns:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'")
+                await db.execute(f"UPDATE {table} SET account_id='default' WHERE account_id IS NULL OR account_id=''")
+            cursor = await db.execute("PRAGMA table_info(cookie_versions)")
+            cookie_columns = {row[1] for row in await cursor.fetchall()}
+            if "account_id" not in cookie_columns:
+                await db.execute("ALTER TABLE cookie_versions ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'")
+            await db.execute("UPDATE cookie_versions SET account_id='default' WHERE account_id IS NULL OR account_id='' ")
+            await db.execute("DROP INDEX IF EXISTS idx_cookie_active")
+            await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cookie_active ON cookie_versions(account_id) WHERE is_active = 1")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cookie_account ON cookie_versions(account_id, uploaded_at DESC)")
+            await db.execute("INSERT OR IGNORE INTO accounts(account_id, display_name, enabled, created_at, updated_at, last_selected_at) VALUES ('default', '默认账号', 1, 0, 0, 0)")
+            cursor = await db.execute("PRAGMA table_info(accounts)")
+            account_columns = {row[1] for row in await cursor.fetchall()}
+            if "last_selected_at" not in account_columns:
+                await db.execute("ALTER TABLE accounts ADD COLUMN last_selected_at REAL NOT NULL DEFAULT 0")
+            await db.commit()
             await db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS dingtalk_config (
@@ -204,35 +239,85 @@ class Database(QueueStoreMixin):
         *,
         cookie_count: int,
         exported_at: str | None,
+        account_id: str = "default",
     ) -> int:
         now = time.time()
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
-            await db.execute("UPDATE cookie_versions SET is_active=0 WHERE is_active=1")
+            await db.execute("INSERT OR IGNORE INTO accounts(account_id, display_name, enabled, created_at, updated_at, last_selected_at) VALUES (?, ?, 1, ?, ?, 0)", (account_id, account_id, now, now))
+            await db.execute("UPDATE cookie_versions SET is_active=0 WHERE account_id=? AND is_active=1", (account_id,))
             cursor = await db.execute(
                 """
                 INSERT INTO cookie_versions(
-                    encrypted_payload, cookie_count, exported_at, uploaded_at, is_active
-                ) VALUES (?, ?, ?, ?, 1)
+                    account_id, encrypted_payload, cookie_count, exported_at, uploaded_at, is_active
+                ) VALUES (?, ?, ?, ?, ?, 1)
                 """,
-                (encrypted_payload, cookie_count, exported_at, now),
+                (account_id, encrypted_payload, cookie_count, exported_at, now),
             )
             version = int(cursor.lastrowid)
             await db.commit()
             return version
 
-    async def get_active_cookie(self) -> tuple[int, bytes, int, float] | None:
+    async def get_active_cookie(self, account_id: str = "default") -> tuple[int, bytes, int, float] | None:
         async with aiosqlite.connect(self.path) as db:
             cursor = await db.execute(
                 """
                 SELECT version, encrypted_payload, cookie_count, uploaded_at
-                FROM cookie_versions WHERE is_active=1 LIMIT 1
-                """
+                FROM cookie_versions WHERE account_id=? AND is_active=1 LIMIT 1
+                """,
+                (account_id,),
             )
             row = await cursor.fetchone()
         if row is None:
             return None
         return int(row[0]), bytes(row[1]), int(row[2]), float(row[3])
+
+    async def list_accounts(self, *, enabled_only: bool = False) -> list[dict[str, object]]:
+        async with aiosqlite.connect(self.path) as db:
+            query = "SELECT account_id, display_name, enabled, last_selected_at FROM accounts"
+            if enabled_only:
+                query += " WHERE enabled=1"
+            query += " ORDER BY last_selected_at, account_id"
+            cursor = await db.execute(query)
+            return [{"account_id": row[0], "display_name": row[1], "enabled": bool(row[2]), "last_selected_at": row[3]}
+                    for row in await cursor.fetchall()]
+
+    async def ensure_account(self, account_id: str, display_name: str | None = None) -> None:
+        account_id = account_id.strip()
+        if not account_id or len(account_id) > 128:
+            raise ValueError("account_id 无效")
+        now = time.time()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("""
+                INSERT INTO accounts(account_id, display_name, enabled, created_at, updated_at, last_selected_at)
+                VALUES (?, ?, 1, ?, ?, 0)
+                ON CONFLICT(account_id) DO UPDATE SET display_name=excluded.display_name, updated_at=excluded.updated_at
+            """, (account_id, display_name or account_id, now, now))
+            await db.commit()
+
+    async def select_account(self, account_id: str | None = None) -> str | None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if account_id:
+                cursor = await db.execute("""
+                    SELECT a.account_id FROM accounts a
+                    JOIN cookie_versions c ON c.account_id=a.account_id AND c.is_active=1
+                    WHERE a.account_id=? AND a.enabled=1
+                """, (account_id,))
+            else:
+                cursor = await db.execute("""
+                    SELECT a.account_id FROM accounts a
+                    JOIN cookie_versions c ON c.account_id=a.account_id AND c.is_active=1
+                    WHERE a.enabled=1 ORDER BY a.last_selected_at, a.account_id LIMIT 1
+                """)
+            row = await cursor.fetchone()
+            if row is None:
+                await db.rollback()
+                return None
+            now = time.time()
+            await db.execute("UPDATE accounts SET last_selected_at=?, updated_at=? WHERE account_id=?", (now, now, row[0]))
+            await db.commit()
+            return str(row[0])
 
     async def get_cookie_version(self, version: int) -> tuple[int, bytes, int, float] | None:
         async with aiosqlite.connect(self.path) as db:
@@ -250,21 +335,21 @@ class Database(QueueStoreMixin):
 
     async def create_upload_task(
         self, image_url: str, *, max_active: int | None = None,
-        idempotency_key: str | None = None,
+        idempotency_key: str | None = None, account_id: str | None = None,
     ) -> str | None:
         task_id, _ = await self._enqueue(
             "upload", {"image_url": image_url}, max_active=max_active,
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key, account_id=account_id,
         )
         return task_id
 
     async def create_product_task(
         self, upload_task_id: str, *, max_active: int | None = None,
-        idempotency_key: str | None = None,
+        idempotency_key: str | None = None, account_id: str | None = None,
     ) -> tuple[str | None, str | None]:
         return await self._enqueue(
             "product", {"upload_task_id": upload_task_id}, max_active=max_active,
-            idempotency_key=idempotency_key,
+            idempotency_key=idempotency_key, account_id=account_id,
         )
 
     async def claim_upload_task(self) -> UploadTaskRecord | None:
@@ -437,6 +522,7 @@ class Database(QueueStoreMixin):
             task_id=row["task_id"],
             status=row["status"],
             image_url=row["image_url"],
+            account_id=row["account_id"],
             cookie_version=row["cookie_version"],
             image_id=row["image_id"],
             search_page_url=row["search_page_url"],
@@ -460,6 +546,7 @@ class Database(QueueStoreMixin):
             task_id=row["task_id"],
             upload_task_id=row["upload_task_id"],
             status=row["status"],
+            account_id=row["account_id"],
             cookie_version=row["cookie_version"],
             result=json.loads(row["result_json"]) if row["result_json"] else None,
             cancel_requested=bool(row["cancel_requested"]),

@@ -79,6 +79,7 @@ class ProductTaskStatusResponse(BaseModel):
 
 class CookieUploadResponse(BaseModel):
     status: Literal["updated"]
+    account_id: str = "default"
     version: int
     cookie_count: int
     exported_at: str | None

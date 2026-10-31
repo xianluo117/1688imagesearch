@@ -87,6 +87,8 @@ def _raise_product_creation_error(code: str) -> None:
         "UPLOAD_TASK_CANCELLED": (status.HTTP_409_CONFLICT, "上传任务已取消"),
         "UPLOAD_TASK_FAILED": (status.HTTP_409_CONFLICT, "上传任务已失败"),
         "QUEUE_FULL": (status.HTTP_429_TOO_MANY_REQUESTS, "任务队列已满"),
+        "ACCOUNT_UNAVAILABLE": (status.HTTP_503_SERVICE_UNAVAILABLE, "指定账号不可用"),
+        "COOKIE_UNAVAILABLE": (status.HTTP_503_SERVICE_UNAVAILABLE, "指定账号没有可用 Cookie"),
     }
     status_code, message = definitions[code]
     raise HTTPException(status_code=status_code, detail={"code": code, "message": message})
@@ -226,7 +228,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "INVALID_JSON", "message": "请求体不是有效 JSON"},
             ) from exc
-        metadata = await cookie_store.save(payload)
+        account_id = request.query_params.get("account_id", "default").strip() or "default"
+        metadata = await cookie_store.save(payload, account_id=account_id)
+        metadata["account_id"] = account_id
         scheduler_state = await database.get_scheduler_state()
         if scheduler_state.state == "paused" and scheduler_state.reason in {
             "RISK_CONTROL", "LOGIN_REQUIRED",
@@ -254,6 +258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str(body.image_url),
             max_active=resolved.max_queued_tasks,
             idempotency_key=idempotency_key(request),
+            account_id=request.query_params.get("account_id"),
         )
         if task_id is None:
             raise HTTPException(
@@ -306,6 +311,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.upload_task_id,
             max_active=resolved.max_queued_tasks,
             idempotency_key=idempotency_key(request),
+            account_id=request.query_params.get("account_id"),
         )
         if error_code is not None:
             _raise_product_creation_error(error_code)

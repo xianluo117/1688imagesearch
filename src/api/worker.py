@@ -59,7 +59,13 @@ class QueueTaskExecutor:
 
     async def execute(self, task, control, run_sync, execute_sku_sync):
         if task.kind == "sku":
-            _, records = await self.cookie_store.load_active()
+            cookie_version = task.payload.get("cookie_version")
+            if cookie_version is None:
+                row = await self.database.get_active_cookie(task.account_id)
+                if row is None:
+                    raise CookieStoreError("尚未上传 1688 Cookie")
+                cookie_version = row[0]
+            _, records = await self.cookie_store.load_version(cookie_version)
             return await run_sync(execute_sku_sync, task.payload["product_url"], records, control)
         if task.kind == "upload":
             upload = await self.database.get_upload_task(task.task_id)

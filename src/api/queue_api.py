@@ -52,6 +52,7 @@ async def queue_task_summary(task_id: str, database) -> dict | None:
     return {
         "seq": task.seq,
         "task_id": task.task_id,
+        "account_id": task.account_id,
         "kind": task.kind,
         "status": task.status,
         "dependency_id": task.dependency_id,
@@ -86,11 +87,16 @@ async def get_sku_task(database, task_id):
     return task
 
 
+@router.get("/api/v1/accounts")
+async def list_accounts(request: Request):
+    return {"accounts": await request.app.state.database.list_accounts()}
+
+
 @router.post("/api/v2/sku-tasks", response_model=SkuTaskResponse, status_code=202)
 async def create_sku_task(body: ProductSkuRequest, request: Request, response: Response):
     url, key = canonical_url(body.product_url), idempotency_key(request)
     try:
-        task_id = await request.app.state.sku_service.submit(url, idempotency_key=key)
+        task_id = await request.app.state.sku_service.submit(url, idempotency_key=key, account_id=body.account_id)
     except SkuServiceError as exc:
         raise HTTPException(exc.status_code, detail=exc.detail()) from None
     response.headers["Location"] = task_location(task_id)

@@ -40,7 +40,7 @@ class CookieStore:
             "has_m_h5_tk_enc": "_m_h5_tk_enc" in names,
         }
 
-    async def save(self, payload: Any) -> dict[str, Any]:
+    async def save(self, payload: Any, *, account_id: str = "default") -> dict[str, Any]:
         records, metadata = self._validate_payload(payload)
         serialized = json.dumps(
             {"cookies": [asdict(record) for record in records]},
@@ -48,10 +48,12 @@ class CookieStore:
             separators=(",", ":"),
         ).encode("utf-8")
         encrypted = self.fernet.encrypt(serialized)
+        await self.database.ensure_account(account_id)
         version = await self.database.store_cookie(
             encrypted,
             cookie_count=len(records),
             exported_at=metadata["exported_at"],
+            account_id=account_id,
         )
         return {"version": version, **metadata}
 
@@ -73,8 +75,8 @@ class CookieStore:
             raise CookieStoreError(f"已存储 Cookie 无效: {exc}") from exc
         return version, records
 
-    async def load_active(self) -> tuple[int, list[ImportedCookie]]:
-        row = await self.database.get_active_cookie()
+    async def load_active(self, account_id: str = "default") -> tuple[int, list[ImportedCookie]]:
+        row = await self.database.get_active_cookie(account_id)
         if row is None:
             raise CookieStoreError("尚未上传 1688 Cookie")
         return await self._decode_row(row)
@@ -82,8 +84,8 @@ class CookieStore:
     async def load_version(self, version: int) -> tuple[int, list[ImportedCookie]]:
         return await self._decode_row(await self.database.get_cookie_version(version))
 
-    async def status(self) -> dict[str, Any]:
-        row = await self.database.get_active_cookie()
+    async def status(self, account_id: str = "default") -> dict[str, Any]:
+        row = await self.database.get_active_cookie(account_id)
         if row is None:
             return {"available": False}
         version, _encrypted, cookie_count, uploaded_at = row

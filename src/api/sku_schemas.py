@@ -12,6 +12,7 @@ class ProductSkuRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product_url: str = Field(strict=True, min_length=1, max_length=4096)
+    account_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ProductSkuResponse(BaseModel):

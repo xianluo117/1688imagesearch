@@ -69,11 +69,12 @@ class RequestGuard:
         self.clock, self.wall_clock, self.sleep, self.uniform = clock, wall_clock, sleep, uniform
         self.poll_seconds = poll_seconds
         self._next_request = 0.0
+        self._account_next_request: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self.stopping = False
 
-    def bind(self, task_id: str, budget: ExecutionBudget) -> "BoundRequestControl":
-        return BoundRequestControl(self, task_id, budget, asyncio.get_running_loop())
+    def bind(self, task_id: str, budget: ExecutionBudget, account_id: str = "default") -> "BoundRequestControl":
+        return BoundRequestControl(self, task_id, budget, account_id, asyncio.get_running_loop())
 
     def stop(self) -> None:
         self.stopping = True
@@ -90,7 +91,7 @@ class RequestGuard:
             budget.fail(SchedulerStoppingError("调度器正在停止"))
         budget.check()
 
-    async def acquire(self, task_id: str, budget: ExecutionBudget) -> None:
+    async def acquire(self, task_id: str, budget: ExecutionBudget, account_id: str = "default") -> None:
         try:
             while True:
                 await self.checkpoint(task_id, budget)
@@ -104,12 +105,19 @@ class RequestGuard:
                     else:
                         budget.resume()
                         budget.check()
-                        delay = self._next_request - self.clock()
+                        now = self.clock()
+                        account_next = self._account_next_request.get(account_id, 0.0)
+                        delay = max(self._next_request, account_next) - now
                         if delay <= 0:
-                            self._next_request = self.clock() + self.uniform(
+                            interval = self.uniform(
+                                getattr(self.settings, "account_request_interval_min_seconds", self.settings.request_interval_min_seconds),
+                                getattr(self.settings, "account_request_interval_max_seconds", self.settings.request_interval_max_seconds),
+                            )
+                            self._next_request = now + self.uniform(
                                 self.settings.request_interval_min_seconds,
                                 self.settings.request_interval_max_seconds,
                             )
+                            self._account_next_request[account_id] = now + interval
                             return
                         delay = min(delay, self.poll_seconds)
                 await self.sleep(delay)
@@ -148,8 +156,8 @@ class BoundRequestControl:
     budget. stop/cancel polling exits the coroutine without abandoning its thread.
     """
 
-    def __init__(self, guard, task_id, budget, loop):
-        self.guard, self.task_id, self.budget, self.loop = guard, task_id, budget, loop
+    def __init__(self, guard, task_id, budget, account_id, loop):
+        self.guard, self.task_id, self.budget, self.account_id, self.loop = guard, task_id, budget, account_id, loop
         self._response = None
 
     def _call(self, method, *args):
@@ -162,7 +170,7 @@ class BoundRequestControl:
         return asyncio.run_coroutine_threadsafe(method(*args), self.loop).result()
 
     def before_request(self) -> None:
-        self._call(self.guard.acquire, self.task_id, self.budget)
+        self._call(self.guard.acquire, self.task_id, self.budget, self.account_id)
         self._response = None
 
     def observe_response(self, response) -> None:

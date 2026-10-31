@@ -38,15 +38,18 @@ class ProductSkuService:
         self.cookie_store, self.settings, self.scheduler = cookie_store, settings, scheduler
         self.database = scheduler.database
 
-    async def submit(self, url: str, *, idempotency_key: str | None = None) -> str:
+    async def submit(self, url: str, *, idempotency_key: str | None = None, account_id: str | None = None) -> str:
         if not self.database.accepting:
             raise SkuServiceError(503, "SKU_SERVICE_STOPPING", "SKU 服务正在停止")
+        selected_account = await self.database.select_account(account_id)
+        if selected_account is None:
+            raise SkuServiceError(503, "ACCOUNT_UNAVAILABLE", "没有可用的 1688 账号")
         try:
-            await self.cookie_store.load_active()
+            await self.cookie_store.load_active(selected_account)
         except CookieStoreError:
             raise SkuServiceError(503, "COOKIE_UNAVAILABLE", "服务器没有可用的 1688 Cookie") from None
         try:
-            task_id = await self.database.create_sku_task(url, idempotency_key=idempotency_key)
+            task_id = await self.database.create_sku_task(url, idempotency_key=idempotency_key, account_id=selected_account)
         except IdempotencyConflict:
             raise SkuServiceError(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同参数") from None
         except QueueNotAccepting:
@@ -55,8 +58,8 @@ class ProductSkuService:
             raise SkuServiceError(429, "QUEUE_FULL", "任务队列已满")
         return task_id
 
-    async def query(self, url: str, *, idempotency_key: str | None = None) -> SkuResult:
-        task_id = await self.submit(url, idempotency_key=idempotency_key)
+    async def query(self, url: str, *, idempotency_key: str | None = None, account_id: str | None = None) -> SkuResult:
+        task_id = await self.submit(url, idempotency_key=idempotency_key, account_id=account_id)
         try:
             task = await self.scheduler.wait_for_task(
                 task_id, timeout=self.settings.sku_query_timeout_seconds,
@@ -66,7 +69,7 @@ class ProductSkuService:
         if task is not None and task.result is not None:
             return restore_result(task.result)
         code = task.error_code if task else "SKU_QUERY_FAILED"
-        status = {"COOKIE_UNAVAILABLE": 503, "TASK_TIMEOUT": 504,
+        status = {"COOKIE_UNAVAILABLE": 503, "ACCOUNT_UNAVAILABLE": 503, "TASK_TIMEOUT": 504,
                   "TASK_CANCELLED": 409, "SCHEDULER_STOPPING": 503}.get(code, 502)
         raise SkuServiceError(status, code if status != 502 else "SKU_QUERY_FAILED",
                               "SKU 查询失败", task_id=task_id)

@@ -77,7 +77,10 @@ class UnifiedQueueScheduler:
         while not self._closing:
             try:
                 if len(self._jobs) < self.settings.global_worker_count:
-                    task = await self.database.claim_next_task(max_running=self.settings.global_worker_count)
+                    task = await self.database.claim_next_task(
+                        max_running=self.settings.global_worker_count,
+                        max_account_running=self.settings.account_max_concurrency,
+                    )
                     if task is not None:
                         job = asyncio.create_task(self._run(task), name=f"queue-{task.task_id}")
                         self._jobs.add(job)
@@ -109,7 +112,7 @@ class UnifiedQueueScheduler:
     async def _run(self, task) -> None:
         timeout = getattr(self.settings, f"{task.kind}_task_timeout_seconds")
         budget = ExecutionBudget(timeout, clock=self.guard.clock)
-        control = self.guard.bind(task.task_id, budget)
+        control = self.guard.bind(task.task_id, budget, task.account_id)
         done = asyncio.Event()
         watcher = asyncio.create_task(self._watch(task.task_id, budget, done))
 
