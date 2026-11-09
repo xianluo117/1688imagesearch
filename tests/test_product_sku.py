@@ -1,5 +1,7 @@
 """Synthetic offline tests only. No real credentials, pages or network requests."""
+import gzip
 import io
+import zlib
 import json
 import sys
 import time
@@ -14,6 +16,7 @@ from curl_cffi import requests
 from image_search.cookies import ImportedCookie
 from product_sku.client import ProductSkuClient
 from product_sku.extraction import MAX_BYTES
+from product_sku.html_encoding import decode_html, META_SCAN_BYTES, HEADER_SCAN_CHARS
 from product_sku.parser import parse_detail
 from product_sku.session import detail_cookie_jar
 from product_sku.urls import normalize_url, redirect_target
@@ -414,6 +417,78 @@ class FakeSession:
         self.closed = True
 
 
+class HtmlEncodingTests(unittest.TestCase):
+    def test_utf8_and_bom_keep_existing_priority(self):
+        for encoding in ("utf-8", "utf-8-sig"):
+            for header in ("", "text/html; charset=gbk", "text/html; charset=unknown"):
+                self.assertEqual(decode_html("中文\U00020000".encode(encoding), header), "中文\U00020000")
+
+    def test_gb_headers_case_quotes_whitespace_and_four_byte_character(self):
+        text = "中文\U00020000"
+        for label in ("GB18030", "gBk", "gb2312"):
+            for value in (label, '" ' + label + ' "', "'" + label + "'"):
+                header = "Text/HTML; CHARSET = " + value + "; other=value"
+                self.assertEqual(decode_html(text.encode("gb18030"), header), text)
+
+    def test_meta_charset_and_http_equiv(self):
+        for meta in ('<META CHARSET = "GB18030">', "<meta charset='gbk'/>",
+                     '<meta charset=gb2312>',
+                     '<meta content="text/html; CHARSET = gbk" HTTP-EQUIV="Content-Type">'):
+            text = meta + "中文\U00020000"
+            self.assertEqual(decode_html(text.encode("gb18030")), text)
+
+    def test_no_undeclared_guess_or_header_substring_match(self):
+        for header in ("", "text/gbk", "text/html; x=gb2312", "text/html; charset=unknown",
+                       "text/html; charset=latin-1", "text/html; charset=gbk-extra",
+                       'text/html; note="x; charset=gbk"'):
+            with self.subTest(header=header), self.assertRaisesRegex(ValueError, "^unsupported_encoding$"):
+                decode_html("中文".encode("gb18030"), header)
+
+    def test_wrong_declared_utf8_and_malformed_gb_are_invalid(self):
+        for body, header in (("中文".encode("gbk"), "text/html; charset=utf-8"),
+                             (b"\xff", "text/html; charset=gbk"),
+                             (b"\x81", "text/html; charset=gb18030"),
+                             (b"\xef\xbb\xbf\xff", "text/html; charset=gbk")):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "^invalid_encoding$"):
+                decode_html(body, header)
+
+    def test_header_precedes_meta_and_conflicts_fail_closed(self):
+        body = '<meta charset=gbk>中文'.encode("gbk")
+        for header, reason in (("text/html; charset=unknown", "unsupported_encoding"),
+                               ("text/html; charset=utf8", "invalid_encoding"),
+                               ("text/html; charset=gbk; charset=utf8", "unsupported_encoding")):
+            with self.assertRaisesRegex(ValueError, "^" + reason + "$"):
+                decode_html(body, header)
+        for prefix in (b'<meta charset=gbk><meta charset=utf8>', b'<meta charset=utf8 charset=gbk>'):
+            with self.assertRaisesRegex(ValueError, "^unsupported_encoding$"):
+                decode_html(prefix + "中文".encode("gbk"))
+
+    def test_meta_scan_is_bounded_and_ignores_comments_scripts_and_other_attrs(self):
+        for prefix in (b" " * META_SCAN_BYTES + b"<meta charset=gbk>",
+                       b" " * (META_SCAN_BYTES - 10) + b'<meta charset="gbk">',
+                       b"<!-- <meta charset=gbk> -->",
+                       b'<script>"<meta charset=gbk>"</script>',
+                       b'<meta content="text/html; charset=gbk">',
+                       b'<div charset=gbk>'):
+            with self.assertRaisesRegex(ValueError, "^unsupported_encoding$"):
+                decode_html(prefix + "中文".encode("gbk"))
+
+    def test_header_and_body_limits(self):
+        for body, header, reason in ((b"\xff", "x" * (HEADER_SCAN_CHARS + 1), "unsupported_encoding"),
+                                     (b"x" * (MAX_BYTES + 1), "", "response_too_large")):
+            with self.assertRaisesRegex(ValueError, "^" + reason + "$"):
+                decode_html(body, header)
+
+    def test_binary_and_compressed_payloads_are_not_gb(self):
+        text = b"<meta charset=gbk>" + "中文".encode("gbk")
+        bodies = [gzip.compress(text), zlib.compress(text), b"BZh123", b"PK\x03\x04abc",
+                  b"\x28\xb5\x2f\xfdabc", b"\xfd7zXZ\x00abc", b"GIF89a", b"%PDF-1.7",
+                  b"\x89PNGabc", b"\xff\xd8\xffabc", b"abc\x00def", b"abc\x01def"]
+        for body in bodies:
+            with self.subTest(body=body[:6]), self.assertRaisesRegex(ValueError, "^unsupported_encoding$"):
+                decode_html(body, "text/html; charset=gbk")
+
+
 class ClientTests(unittest.TestCase):
     def fetch(self, responses, **kwargs):
         session = FakeSession(responses)
@@ -490,6 +565,35 @@ class ClientTests(unittest.TestCase):
             result, _ = self.fetch([response], max_bytes=20)
             self.assertEqual(result.reason, reason)
             self.assertTrue(response.closed)
+
+    def test_declared_gb_response_preserves_sku_values(self):
+        for prefix, headers in (("", {"Content-Type": 'text/html; CHARSET = "GB18030"'}),
+                                ('<meta charset=gbk>', {}),
+                                ('<meta http-equiv="content-type" content="text/html; charset=gb2312">', {})):
+            response = FakeResponse(body=page(business(), prefix).encode("gb18030"), headers=headers)
+            result, session = self.fetch([response])
+            self.assertTrue(result.ok)
+            self.assertEqual(result.skus[0].specifications[0].value, "蓝色")
+            self.assertTrue(response.closed)
+            self.assertEqual(session.calls[0][1]["accept_encoding"], "gzip, deflate, br")
+
+    def test_encoding_failure_reasons_are_compatible_and_close_response(self):
+        for body, header, reason in ((b"\xff", "", "unsupported_encoding"),
+                                     (b"\xff", "text/html; charset=gbk", "invalid_encoding"),
+                                     (gzip.compress(b"<html>test</html>"), "text/html; charset=gbk", "unsupported_encoding")):
+            response = FakeResponse(body=body, headers={"Content-Type": header, "Content-Encoding": "gzip"})
+            result, session = self.fetch([response])
+            self.assertEqual((result.status, result.reason), ("parse_failed", reason))
+            self.assertEqual(len(session.calls), 1)
+            self.assertTrue(response.closed)
+
+    def test_already_decompressed_body_with_retained_encoding_header(self):
+        for encoding, header in (("utf-8", ""), ("gb18030", "text/html; charset=gb18030")):
+            response = FakeResponse(body=page(business()).encode(encoding),
+                                    headers={"Content-Type": header, "Content-Encoding": "gzip"})
+            result, _ = self.fetch([response])
+            self.assertTrue(result.ok)
+            self.assertEqual(result.skus[0].specifications[0].value, "蓝色")
 
     def test_cli_success_failure_and_secret_safety(self):
         for result, exit_code in ((parse_detail(page(business()), URL), 0), (parse_detail("", URL), 1)):

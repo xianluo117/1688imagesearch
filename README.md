@@ -242,6 +242,20 @@ SKU 查询、价格口径和 v1/v2 兼容说明见 [`docs/merchant-sku-api.md`](
 
 API 使用 FastAPI、SQLite 和单进程统一调度器。图片上传、图搜商品查询、两版同步及异步 SKU 共用队列：默认全局任务并发 1、实际 1688 请求随机间隔 2～4 秒、排队加执行总容量 100。完整配置、SKU 异步路由、幂等、状态恢复和停机迁移见 [`docs/unified-queue.md`](docs/unified-queue.md)。
 
+#### 后台管理入口
+
+API 服务启动后，可以通过以下页面进行后台管理：
+
+- **告警控制台**：打开 `http(s)://你的域名/console`。
+  - 首先输入 `.env` 中的 `SEARCH_API_KEY` 并保存。这里使用的是搜索密钥，不是 `COOKIE_UPLOAD_API_KEY`。
+  - 在“钉钉机器人配置”中填写自定义机器人 Webhook 的 `access_token` 和加签 `Secret`，点击“保存配置”。配置保存到 API 服务使用的 SQLite 数据库，服务重启后仍然保留。
+  - 点击“测试发送”验证钉钉机器人配置。后台检测到 `RISK_CONTROL`、`LOGIN_REQUIRED`、`COOKIE_INVALID` 或 `MTOP_TOKEN_INVALID` 时会自动发送告警；同一原因 60 分钟内最多发送一次。
+- **队列查看页面**：打开 `http(s)://你的域名/queue`。
+  - 输入并保存同一个 `SEARCH_API_KEY`。
+  - 页面每 5 秒自动刷新，默认显示 `queued` 和 `running` 任务，可按任务类型筛选，并支持批量取消任务。
+
+两个页面本身不做访问密钥校验，页面中的数据接口和操作接口均要求 `X-API-Key: SEARCH_API_KEY`。生产环境应通过 HTTPS 反向代理访问，避免密钥在不安全的网络中传输。
+
 - Cookie 加密保存在 SQLite。
 
 API Cookie 默认存储在 [data/image-search.db](data/image-search.db) 的 [cookie_versions 表](src/api/database.py)，可用 [DATABASE_PATH 配置](src/api/config.py:108)覆写；此处是默认值，不代表已确认部署实际路径。独立命令行的 Cookie 文件参数读取指定文件，浏览器下载的 Cookie JSON 是人工备份，不是 API 活动存储。备份或迁移 API 时同时保留数据库及原 [COOKIE_ENCRYPTION_KEY](src/api/config.py)，否则无法解密；不要输出或提交密钥。

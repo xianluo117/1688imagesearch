@@ -1,4 +1,5 @@
 """Description parsing, optional fetch failures and API round trips."""
+import gzip
 import json
 import unittest
 from http.cookiejar import CookieJar
@@ -36,7 +37,7 @@ def result():
 
 
 def client(body=None, status=200):
-    response = Mock(status_code=status)
+    response = Mock(status_code=status, headers={})
     response.iter_content.return_value = [body or ('<img src="' + IMAGE + '">').encode()]
     instance = SimpleNamespace(session=Mock(), request_control=None, timeout=20, max_bytes=4096)
     instance.session.get.return_value = response
@@ -71,6 +72,41 @@ class DetailImageTests(unittest.TestCase):
         restored = restore_result(enriched.to_dict())
         self.assertEqual(ProductSkuResponse.model_validate(restored.to_dict()).detail_images, [IMAGE])
         self.assertEqual(convert_result(restored).data.product.detail_images, [IMAGE])
+
+    def test_description_declared_gb_html_and_assignment(self):
+        for prefix, header in (("", 'text/html; charset="GB18030"'),
+                               ('<meta charset=gbk>', ""),
+                               ('<meta http-equiv="content-type" content="text/html; charset=gb2312">', "")):
+            text = prefix + '<p>中文</p><img src="' + IMAGE + '">'
+            instance, response = client(text.encode("gb18030"))
+            response.headers = {"Content-Type": header, "Content-Encoding": "gzip"}
+            enriched = enrich_detail_images(instance, page(), result())
+            self.assertEqual(enriched.detail_images, [IMAGE])
+            self.assertNotIn("detail_images_fetch_failed", enriched.warnings)
+            self.assertEqual(instance.session.get.call_args.kwargs["accept_encoding"], "gzip, deflate, br")
+            response.close.assert_called_once()
+        text = 'var offer_details=' + json.dumps({"content": '<p>中文</p><img src="' + IMAGE + '">'}, ensure_ascii=False)
+        instance, response = client(text.encode("gbk"))
+        response.headers = {"Content-Type": "text/plain; charset=gbk"}
+        self.assertEqual(enrich_detail_images(instance, page(), result()).detail_images, [IMAGE])
+
+    def test_description_encoding_failures_keep_optional_warning(self):
+        for body, header in (("中文".encode("gbk"), ""),
+                             (b"\xff", "text/html; charset=gbk"),
+                             (b"\xff", "text/html; charset=unknown"),
+                             (gzip.compress(b'<img src="' + IMAGE.encode() + b'">'), "text/html; charset=gbk")):
+            instance, response = client(body)
+            response.headers = {"Content-Type": header}
+            enriched = enrich_detail_images(instance, page(), result())
+            self.assertTrue(enriched.ok)
+            self.assertEqual(enriched.warnings, ["detail_images_fetch_failed"])
+            self.assertEqual(enriched.detail_images, [])
+            response.close.assert_called_once()
+
+    def test_utf8_description_with_retained_compression_header(self):
+        instance, response = client(('<p>中文</p><img src="' + IMAGE + '">').encode("utf-8-sig"))
+        response.headers = {"Content-Encoding": "br"}
+        self.assertEqual(enrich_detail_images(instance, page(), result()).detail_images, [IMAGE])
 
     def test_legacy_result(self):
         payload = result().to_dict()

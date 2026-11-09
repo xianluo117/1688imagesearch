@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from request_control import notify
 
 from .extraction import Page, json_roots
+from .html_encoding import decode_html
 from .specification_images import safe_image_url
 
 
@@ -89,7 +90,7 @@ def enrich_detail_images(client, text: str, result):
         try:
             response = client.session.get(
                 url, allow_redirects=False, stream=True,
-                timeout=min(client.timeout, 5),
+                timeout=min(client.timeout, 5), accept_encoding="gzip, deflate, br",
                 headers={"Accept": "text/plain,text/html,application/json", "Referer": result.canonical_url},
             )
             notify(client.request_control, "observe_response", response)
@@ -102,7 +103,8 @@ def enrich_detail_images(client, text: str, result):
                 if size > client.max_bytes:
                     raise ValueError("description_too_large")
                 chunks.append(chunk)
-            images = parse_description(b"".join(chunks).decode("utf-8-sig"))
+            images = parse_description(decode_html(
+                b"".join(chunks), response.headers.get("Content-Type", "")))
         except Exception as exc:
             notify(client.request_control, "observe_error", exc)
             raise

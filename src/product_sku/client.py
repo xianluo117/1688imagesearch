@@ -11,6 +11,7 @@ from image_search.cookies import ImportedCookie, load_cookie_records
 
 from .extraction import MAX_BYTES
 from .detail_images import enrich_detail_images
+from .html_encoding import decode_html
 from .models import SkuResult
 from .parser import parse_detail
 from .session import detail_cookie_jar
@@ -87,6 +88,7 @@ class ProductSkuClient:
             try:
                 response = self.session.get(
                     current, allow_redirects=False, stream=True, timeout=self.timeout,
+                    accept_encoding="gzip, deflate, br",
                     headers={"Accept": "text/html,application/xhtml+xml",
                              "Accept-Language": "zh-CN,zh;q=0.9"},
                 )
@@ -131,17 +133,10 @@ class ProductSkuClient:
                             return failure("parse_failed", "response_too_large")
                         chunks.append(chunk)
                     body = b"".join(chunks)
-                    # Decode losslessly or fail rather than corrupt specification values.
                     try:
-                        text = body.decode("utf-8-sig")
-                    except UnicodeDecodeError:
-                        content_type = response.headers.get("Content-Type", "").lower()
-                        if "gbk" not in content_type and "gb2312" not in content_type:
-                            return failure("parse_failed", "unsupported_encoding")
-                        try:
-                            text = body.decode("gb18030")
-                        except UnicodeDecodeError:
-                            return failure("parse_failed", "invalid_encoding")
+                        text = decode_html(body, response.headers.get("Content-Type", ""))
+                    except ValueError as exc:
+                        return failure("parse_failed", str(exc))
                     result = parse_detail(text, canonical)
                     response.close()
                     response = None

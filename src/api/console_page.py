@@ -32,9 +32,50 @@ function key() { return $('apiKey').value.trim(); }
 function headers(json=false) { return { 'X-API-Key': key(), ...(json ? {'Content-Type':'application/json'} : {}) }; }
 function time(v) { return v ? new Date(v * 1000).toLocaleString() : '-'; }
 function show(v, error=false) { $('message').textContent = v; $('message').style.color = error ? '#b91c1c' : '#166534'; }
-async function load() { const r = await fetch('/api/v1/console/alerts', {headers: headers()}); if (!r.ok) throw Error('读取告警状态失败'); const p = await r.json(); $('status').textContent = p.configured ? '钉钉机器人已配置' : '尚未配置钉钉机器人'; $('alerts').innerHTML = p.alerts.length ? p.alerts.map(a => `<tr><td>${a.reason}</td><td>${time(a.last_sent_at)}</td><td>${time(a.next_allowed_at)}</td></tr>`).join('') : '<tr><td colspan="3">暂无自动告警记录</td></tr>'; }
-$('saveKey').onclick = () => { sessionStorage.setItem('console-api-key', key()); load().catch(e => show(e.message, true)); };
-$('save').onclick = async () => { try { const r = await fetch('/api/v1/console/config', {method:'PUT', headers:headers(true), body:JSON.stringify({access_token:$('token').value, secret:$('secret').value})}); if (!r.ok) throw Error('保存失败'); $('token').value=''; $('secret').value=''; show('配置已保存'); await load(); } catch(e) { show(e.message, true); } };
-$('test').onclick = async () => { try { const r = await fetch('/api/v1/console/test-dingtalk', {method:'POST', headers:headers(true), body:JSON.stringify({content:$('text').value})}); if (!r.ok) throw Error('测试发送失败'); show('测试消息已发送'); } catch(e) { show(e.message, true); } };
-load().catch(e => show(e.message, true)); setInterval(() => load().catch(e => show(e.message, true)), 30000);
+async function request(path, method='GET', body) {
+  if (!key()) throw Error('请先输入 SEARCH_API_KEY（不是 Cookie 上传密钥）');
+  const response = await fetch(path, {
+    method, headers: headers(body !== undefined),
+    ...(body !== undefined ? {body: JSON.stringify(body)} : {})
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const detail = payload && payload.detail;
+    const message = response.status === 401 ? 'SEARCH_API_KEY 无效，请输入服务端配置的搜索密钥' :
+      (typeof detail === 'string' ? detail : detail && detail.message);
+    throw Error(`${message || response.statusText || '请求失败'}（HTTP ${response.status}）`);
+  }
+  return response.json();
+}
+async function load() {
+  if (!key()) { $('status').textContent = '请先输入 SEARCH_API_KEY'; return; }
+  const p = await request('/api/v1/console/alerts');
+  $('status').textContent = p.configured ? '钉钉机器人已配置' : '尚未配置钉钉机器人';
+  $('alerts').innerHTML = p.alerts.length ? p.alerts.map(a => `<tr><td>${a.reason}</td><td>${time(a.last_sent_at)}</td><td>${time(a.next_allowed_at)}</td></tr>`).join('') : '<tr><td colspan="3">暂无自动告警记录</td></tr>';
+}
+$('saveKey').onclick = async () => {
+  try {
+    await request('/api/v1/console/config');
+    sessionStorage.setItem('console-api-key', key());
+    await load(); show('访问密钥已保存');
+  } catch(e) { show(e.message, true); }
+};
+$('save').onclick = async () => {
+  try {
+    await request('/api/v1/console/config', 'PUT', {access_token:$('token').value, secret:$('secret').value});
+    $('token').value=''; $('secret').value=''; show('配置已保存');
+    await load();
+  } catch(e) { show(e.message, true); }
+};
+$('test').onclick = async () => {
+  try {
+    await request('/api/v1/console/test-dingtalk', 'POST', {content:$('text').value});
+    show('测试消息已发送');
+  } catch(e) { show(e.message, true); }
+};
+async function refreshStatus() {
+  try { await load(); }
+  catch(e) { $('status').textContent = e.message; }
+}
+refreshStatus(); setInterval(refreshStatus, 30000);
 </script></main></body></html>'''
