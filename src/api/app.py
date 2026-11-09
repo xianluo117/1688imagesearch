@@ -231,12 +231,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         account_id = request.query_params.get("account_id", "default").strip() or "default"
         metadata = await cookie_store.save(payload, account_id=account_id)
         metadata["account_id"] = account_id
-        scheduler_state = await database.get_scheduler_state()
-        if scheduler_state.state == "paused" and scheduler_state.reason in {
-            "RISK_CONTROL", "LOGIN_REQUIRED",
-        }:
-            await scheduler.resume()
         return CookieUploadResponse(status="updated", **metadata)
+
+    @app.post("/api/v1/accounts/sync")
+    async def sync_account(request: Request, x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+        require_api_key(x_api_key, resolved.cookie_upload_api_key, scope="Cookie 上传")
+        body = await request.json()
+        if not body.get("account_id") or body.get("login_confirmed") is not True or not body.get("identity_source"):
+            raise HTTPException(400, detail={"code": "LOGIN_NOT_CONFIRMED", "message": "缺少已确认的账号身份或登录状态"})
+        metadata = await cookie_store.save(
+            body["cookie_payload"], account_id=body["account_id"],
+            display_name=body.get("display_name"), confirmed_login=True,
+        )
+        return {"status": "updated", "account_id": body["account_id"], **metadata}
+
+    @app.post("/api/v1/accounts/risk")
+    async def report_account_risk(request: Request, x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+        require_api_key(x_api_key, resolved.cookie_upload_api_key, scope="Cookie 上传")
+        body = await request.json()
+        if not body.get("account_id"):
+            raise HTTPException(400, detail="缺少账号身份")
+        await database.pause_account(body["account_id"], "RISK_CONTROL")
+        return {"status": "paused", "account_id": body["account_id"]}
 
     @app.post(
         "/api/v1/upload-tasks",
@@ -249,21 +265,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     ) -> UploadTaskCreated:
         require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
-        if (await cookie_store.status())["available"] is not True:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"code": "COOKIE_UNAVAILABLE", "message": "尚未上传 1688 Cookie"},
-            )
-        task_id = await database.create_upload_task(
-            str(body.image_url),
+        task_id, error = await database._enqueue(
+            "upload", {"image_url": str(body.image_url)},
             max_active=resolved.max_queued_tasks,
             idempotency_key=idempotency_key(request),
             account_id=request.query_params.get("account_id"),
         )
         if task_id is None:
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={"code": "QUEUE_FULL", "message": "任务队列已满"},
+                status_code=503 if error == "ACCOUNT_UNAVAILABLE" else 429,
+                detail={"code": error, "message": "没有可用账号" if error == "ACCOUNT_UNAVAILABLE" else "任务队列已满"},
             )
         task = await database.get_upload_task(task_id)
         return UploadTaskCreated(task_id=task_id, status=task.status)

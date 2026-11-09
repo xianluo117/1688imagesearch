@@ -95,8 +95,9 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_or_corrupt_cookie_is_safe_503(self):
         response = await self.post()
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"]["code"], "COOKIE_UNAVAILABLE")
-        with patch.object(self.app.state.cookie_store, "load_active", AsyncMock(
+        self.assertEqual(response.json()["detail"]["code"], "ACCOUNT_UNAVAILABLE")
+        await self.save_cookie()
+        with patch.object(self.app.state.cookie_store, "load_version", AsyncMock(
             side_effect=CookieStoreError(SECRET),
         )):
             response = await self.post()
@@ -140,7 +141,7 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fake.__exit__.call_count, 2)
         kwargs = self.factory.call_args.kwargs
         self.assertEqual(kwargs["timeout"], 20)
-        self.assertEqual(kwargs["network_retries"], 1)
+        self.assertEqual(kwargs["network_retries"], 0)
         self.assertEqual(kwargs["cookie_records"][0].value, SECRET)
         self.assertEqual(sum((await self.app.state.database.upload_task_counts()).values()), 0)
         self.assertEqual(sum((await self.app.state.database.product_task_counts()).values()), 0)
@@ -262,7 +263,10 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["warnings"], ["fixed_warning"])
             self.assertEqual(response.json()["sizes"], [])
             self.assertEqual(response.json()["color_sizes"], [])
-            await self.app.state.scheduler.resume()
+            version = await self.app.state.database.get_active_cookie()
+            await self.app.state.database.store_cookie(
+                version[1], cookie_count=version[2], exported_at=None, confirmed_login=True,
+            )
 
     async def test_unusable_cookie_constructor_and_exception_redaction(self):
         await self.save_cookie()

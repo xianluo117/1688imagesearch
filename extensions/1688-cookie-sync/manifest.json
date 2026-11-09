@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "1688 账号 Cookie 同步",
+  "version": "0.1.0",
+  "description": "每 30 分钟检查页面并按昵称同步当前浏览器账号 Cookie。",
+  "permissions": ["alarms", "cookies", "storage", "tabs", "scripting", "notifications"],
+  "host_permissions": ["https://*.1688.com/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_popup": "popup.html"}
+}

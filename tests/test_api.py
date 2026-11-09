@@ -226,7 +226,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(legacy.status_code, 404)
 
-    async def test_cookie_upload_auto_resumes_only_login_or_risk_pause(self) -> None:
+    async def test_legacy_cookie_upload_never_resumes_global_protection(self) -> None:
         for reason in ("RISK_CONTROL", "LOGIN_REQUIRED"):
             await self.app.state.database.pause_scheduler(reason)
             response = await self.client.post(
@@ -236,7 +236,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 200, response.text)
             state = await self.app.state.database.get_scheduler_state()
-            self.assertEqual((state.state, state.reason), ("normal", None))
+            self.assertEqual((state.state, state.reason), ("paused", reason))
 
         await self.app.state.database.pause_scheduler("MANUAL_CHECK")
         response = await self.client.post(
@@ -258,6 +258,31 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         state = await self.app.state.database.get_scheduler_state()
         self.assertEqual(state.state, "cooldown")
+
+    async def test_confirmed_sync_recovers_only_its_account(self) -> None:
+        db = self.app.state.database
+        headers = {"X-API-Key": UPLOAD_KEY}
+        for account in ("昵称A", "昵称B"):
+            response = await self.client.post("/api/v1/accounts/sync", headers=headers, json={
+                "account_id": account, "display_name": account, "identity_source": "account-page",
+                "login_confirmed": True, "cookie_payload": cookie_payload(),
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            response = await self.client.post("/api/v1/accounts/risk", headers=headers, json={"account_id": account})
+            self.assertEqual(response.status_code, 200)
+        await self.client.post("/api/v1/cookies", params={"account_id": "昵称A"}, headers=headers, json=cookie_payload())
+        self.assertEqual((await db.get_account_state("昵称A"))["state"], "paused")
+        body = {"account_id": "昵称A", "display_name": "昵称A", "identity_source": "account-page",
+                "login_confirmed": False, "cookie_payload": cookie_payload()}
+        rejected = await self.client.post("/api/v1/accounts/sync", headers=headers, json=body)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual((await db.get_account_state("昵称A"))["state"], "paused")
+        body["login_confirmed"] = True
+        recovered = await self.client.post("/api/v1/accounts/sync", headers=headers, json=body)
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual((await db.get_account_state("昵称A"))["state"], "normal")
+        self.assertEqual((await db.get_account_state("昵称B"))["state"], "paused")
+        self.assertEqual((await db.get_scheduler_state()).state, "normal")
 
     async def test_health_shape(self) -> None:
         response = await self.client.get(

@@ -40,7 +40,8 @@ class CookieStore:
             "has_m_h5_tk_enc": "_m_h5_tk_enc" in names,
         }
 
-    async def save(self, payload: Any, *, account_id: str = "default") -> dict[str, Any]:
+    async def save(self, payload: Any, *, account_id: str = "default",
+                   display_name: str | None = None, confirmed_login: bool = False) -> dict[str, Any]:
         records, metadata = self._validate_payload(payload)
         serialized = json.dumps(
             {"cookies": [asdict(record) for record in records]},
@@ -48,12 +49,13 @@ class CookieStore:
             separators=(",", ":"),
         ).encode("utf-8")
         encrypted = self.fernet.encrypt(serialized)
-        await self.database.ensure_account(account_id)
         version = await self.database.store_cookie(
             encrypted,
             cookie_count=len(records),
             exported_at=metadata["exported_at"],
             account_id=account_id,
+            display_name=display_name,
+            confirmed_login=confirmed_login,
         )
         return {"version": version, **metadata}
 

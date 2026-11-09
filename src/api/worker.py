@@ -84,7 +84,16 @@ class QueueTaskExecutor:
         if product is None or upload is None or upload.status != "succeeded" or not upload.image_id or not upload.search_page_url:
             raise ProtocolError("关联上传任务结果不可用")
         _, records = await self.cookie_store.load_version(product.cookie_version)
-        return await run_sync(self.product_sync, records, upload.image_id, upload.search_page_url, control)
+        image_id, search_page_url = upload.image_id, upload.search_page_url
+        if task.payload.get("attempt", 1) == 2:
+            content = await download_image(
+                upload.image_url, max_bytes=self.settings.max_image_bytes,
+                connect_timeout=self.settings.download_connect_timeout,
+                total_timeout=self.settings.download_timeout,
+            )
+            uploaded = await run_sync(self.upload_sync, records, content, control)
+            image_id, search_page_url = uploaded["image_id"], uploaded["search_page_url"]
+        return await run_sync(self.product_sync, records, image_id, search_page_url, control)
 
     def _image_client(self, records, control):
         return ImageSearchClient(
@@ -93,7 +102,7 @@ class QueueTaskExecutor:
                                   request_interval=self.settings.search_ready_interval,
                                   max_image_bytes=self.settings.max_image_bytes),
             timeout=self.settings.search_http_timeout,
-            network_retries=self.settings.search_network_retries, request_control=control,
+            network_retries=0, request_control=control,
         )
 
     def upload_sync(self, records, content, control):
@@ -115,7 +124,7 @@ class QueueTaskExecutor:
     def sku_sync(self, url, records, control):
         try:
             client = ProductSkuClient(cookie_records=records, timeout=self.settings.sku_http_timeout,
-                                      network_retries=1, request_control=control)
+                                      network_retries=0, request_control=control)
         except ValueError:
             raise CookieStoreError("服务器没有可用的 1688 Cookie") from None
         with client as active_client:

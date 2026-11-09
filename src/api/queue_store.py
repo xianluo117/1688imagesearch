@@ -74,7 +74,7 @@ class QueueStoreMixin(SchedulerStoreMixin):
         self, kind: TaskKind, payload: dict[str, Any], *,
         max_active: int | None, idempotency_key: str | None, account_id: str | None = None,
     ) -> tuple[str | None, str | None]:
-        canonical = encode(payload)
+        canonical = encode({**payload, "account_id": account_id} if account_id is not None else payload)
         limit = self.queue_capacity if max_active is None else min(self.queue_capacity, max_active)
         if limit < 1:
             raise ValueError("max_active must be positive")
@@ -82,25 +82,13 @@ class QueueStoreMixin(SchedulerStoreMixin):
             await db.execute("BEGIN IMMEDIATE")
             if not self.accepting:
                 raise QueueNotAccepting("queue is stopping")
-            if account_id:
-                account_id = account_id.strip() or "default"
-                account = await db.execute("""
-                    SELECT a.enabled FROM accounts a
-                    JOIN cookie_versions c ON c.account_id=a.account_id AND c.is_active=1
-                    WHERE a.account_id=?
-                """, (account_id,))
-            else:
-                account = await db.execute("""
-                    SELECT a.account_id, a.enabled FROM accounts a
-                    JOIN cookie_versions c ON c.account_id=a.account_id AND c.is_active=1
-                    WHERE a.enabled=1 ORDER BY a.last_selected_at, a.account_id LIMIT 1
-                """)
-            account_row = await account.fetchone()
-            if account_row is None or (account_id and not account_row[0]):
-                return None, "ACCOUNT_UNAVAILABLE"
-            if not account_id:
-                account_id = str(account_row[0])
-            await db.execute("UPDATE accounts SET last_selected_at=?, updated_at=? WHERE account_id=?", (time.time(), time.time(), account_id))
+            if idempotency_key is not None:
+                c = await db.execute("SELECT * FROM queue_idempotency WHERE key=?", (idempotency_key,))
+                previous = await c.fetchone()
+                if previous is not None:
+                    if previous["kind"] != kind or previous["payload_json"] != canonical:
+                        raise IdempotencyConflict(idempotency_key)
+                    return previous["task_id"], None
             cookie_version = None
             dependency = payload["upload_task_id"] if kind == "product" else None
             if dependency is not None:
@@ -118,29 +106,21 @@ class QueueStoreMixin(SchedulerStoreMixin):
             if (await c.fetchone())[0] >= limit:
                 return None, "QUEUE_FULL"
             now, task_id = time.time(), str(uuid.uuid4())
-            if kind == "sku":
-                active = await db.execute("SELECT version FROM cookie_versions WHERE account_id=? AND is_active=1", (account_id,))
-                active_row = await active.fetchone()
-                if active_row is None:
-                    return None, "COOKIE_UNAVAILABLE"
-                payload = {**payload, "cookie_version": int(active_row[0])}
-                canonical = encode(payload)
-            if idempotency_key is not None:
-                c = await db.execute("SELECT * FROM queue_idempotency WHERE key=?", (idempotency_key,))
-                previous = await c.fetchone()
-                if previous is not None:
-                    if previous["kind"] != kind or previous["payload_json"] != canonical:
-                        raise IdempotencyConflict(idempotency_key)
-                    return previous["task_id"], None
+            if kind != "product":
+                selected = await self._select_account_in_transaction(db, account_id)
+                if selected is None:
+                    return None, "ACCOUNT_UNAVAILABLE"
+                account_id, cookie_version = selected
+            payload = {**payload, "cookie_version": cookie_version}
             await db.execute("""
                 INSERT INTO queue_tasks(task_id,kind,account_id,status,payload_json,dependency_id,created_at,updated_at)
                 VALUES (?,?,?,'queued',?,?,?,?)
-            """, (task_id, kind, account_id, canonical, dependency, now, now))
+            """, (task_id, kind, account_id, encode(payload), dependency, now, now))
             if kind == "upload":
                 await db.execute("""
-                    INSERT INTO upload_tasks(task_id,status,image_url,account_id,created_at,updated_at)
-                    VALUES (?,'queued',?,?,?,?)
-                """, (task_id, payload["image_url"], account_id, now, now))
+                    INSERT INTO upload_tasks(task_id,status,image_url,account_id,cookie_version,created_at,updated_at)
+                    VALUES (?,'queued',?,?,?,?,?)
+                """, (task_id, payload["image_url"], account_id, cookie_version, now, now))
             elif kind == "product":
                 await db.execute("""
                     INSERT INTO product_tasks(task_id,upload_task_id,status,cookie_version,account_id,created_at,updated_at)
@@ -196,10 +176,14 @@ class QueueStoreMixin(SchedulerStoreMixin):
             c = await db.execute("""
                 SELECT q.* FROM queue_tasks q
                 WHERE q.status='queued' AND q.cancel_requested=0 AND (? IS NULL OR q.kind=?)
+                  AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id=q.account_id AND a.enabled=1
+                      AND (a.state='normal' OR (a.state='cooldown' AND a.until<=?)))
+                  AND (? IS NULL OR (SELECT COUNT(*) FROM queue_tasks r
+                      WHERE r.status='running' AND r.account_id=q.account_id) < ?)
                   AND (q.dependency_id IS NULL OR EXISTS (
                       SELECT 1 FROM queue_tasks p WHERE p.task_id=q.dependency_id AND p.status='succeeded'))
                 ORDER BY q.seq LIMIT 1
-            """, (kind, kind))
+            """, (kind, kind, now, max_account_running, max_account_running))
             row = await c.fetchone()
             if row is None:
                 await db.commit()
@@ -212,8 +196,7 @@ class QueueStoreMixin(SchedulerStoreMixin):
             task_id = row["task_id"]
             if row["kind"] == "upload":
                 await db.execute("""
-                    UPDATE upload_tasks SET status='running', started_at=?, updated_at=?,
-                        cookie_version=(SELECT version FROM cookie_versions WHERE account_id=upload_tasks.account_id AND is_active=1)
+                    UPDATE upload_tasks SET status='running', started_at=?, updated_at=?
                     WHERE task_id=? AND status='queued'
                 """, (now, now, task_id))
             elif row["kind"] == "product":
@@ -299,6 +282,33 @@ class QueueStoreMixin(SchedulerStoreMixin):
             elif row["kind"] == "sku" and status == "succeeded":
                 raise ValueError("SKU success requires an original business result")
             now = time.time()
+            payload = json.loads(row["payload_json"])
+            attempt = payload.get("attempt", 1)
+            await db.execute("""
+                INSERT OR REPLACE INTO queue_attempts
+                    (task_id,attempt,account_id,cookie_version,status,error_code,error_message,result_json)
+                VALUES (?,?,?,?,?,?,?,?)
+            """, (task_id, attempt, row["account_id"], payload.get("cookie_version"), status,
+                  error_code, error_message, encode(result) if result is not None else None))
+            if status == "failed" and attempt == 1 and self.accepting and error_code != "SCHEDULER_STOPPING":
+                selected = await self._select_account_in_transaction(db, exclude=row["account_id"])
+                if selected is not None:
+                    account_id, version = selected
+                    payload.update(attempt=2, cookie_version=version)
+                    await db.execute("""
+                        UPDATE queue_tasks SET status='queued', account_id=?, payload_json=?,
+                            result_json=NULL, error_code=NULL, error_message=NULL,
+                            started_at=NULL, finished_at=NULL, updated_at=? WHERE task_id=?
+                    """, (account_id, encode(payload), now, task_id))
+                    if row["kind"] != "sku":
+                        table = "upload_tasks" if row["kind"] == "upload" else "product_tasks"
+                        await db.execute(f"""
+                            UPDATE {table} SET status='queued', account_id=?, cookie_version=?,
+                                error_code=NULL, error_message=NULL, started_at=NULL,
+                                finished_at=NULL, updated_at=? WHERE task_id=?
+                        """, (account_id, version, now, task_id))
+                    await db.commit()
+                    return "queued"
             values = (status, error_code, error_message, now, now, task_id)
             if row["kind"] == "sku":
                 await db.execute("""
@@ -321,6 +331,17 @@ class QueueStoreMixin(SchedulerStoreMixin):
                 """, values)
             await db.commit()
             return status
+
+    async def list_task_attempts(self, task_id: str) -> list[dict[str, Any]]:
+        async with self._queue_connection() as db:
+            c = await db.execute("SELECT * FROM queue_attempts WHERE task_id=? ORDER BY attempt", (task_id,))
+            attempts = []
+            for row in await c.fetchall():
+                item = dict(row)
+                raw = item.pop("result_json")
+                item["result"] = json.loads(raw) if raw else None
+                attempts.append(item)
+            return attempts
 
     async def queue_task_counts(self) -> dict[str, int]:
         return await self._task_counts("queue_tasks")

@@ -16,6 +16,10 @@ class SchedulerStoppingError(RuntimeError):
     pass
 
 
+class AccountUnavailableError(RuntimeError):
+    pass
+
+
 @dataclass
 class ExecutionBudget:
     timeout: float
@@ -96,6 +100,9 @@ class RequestGuard:
             while True:
                 await self.checkpoint(task_id, budget)
                 async with self._lock:
+                    account = await self.database.get_account_state(account_id)
+                    if account is None or not account["enabled"] or account["state"] != "normal":
+                        raise AccountUnavailableError(f"账号 {account_id} 不可用")
                     state = await self.database.get_scheduler_state(now=self.wall_clock())
                     # Admission must recheck after SQLite awaits (including shutdown).
                     await self.checkpoint(task_id, budget)
@@ -124,29 +131,29 @@ class RequestGuard:
         finally:
             budget.resume()
 
-    async def _persist(self, signal, response=None) -> None:
+    async def _persist(self, signal, response=None, account_id="default") -> None:
         if signal is None:
             return
         state, reason = signal
         async with self._lock:
             if state == "paused":
-                await self.database.pause_scheduler(reason)
+                await self.database.pause_account(account_id, reason)
             else:
                 now = self.wall_clock()
                 headers = getattr(response, "headers", {}) or {}
                 extra = retry_after_seconds(headers.get("Retry-After", headers.get("retry-after")), now)
                 duration = max(self.settings.rate_limit_cooldown_seconds, extra or 0)
-                await self.database.set_cooldown(reason, until=now + duration)
+                await self.database.cooldown_account(account_id, reason, until=now + duration)
 
-    async def observe_response(self, response) -> None:
-        await self._persist(response_signal(response), response)
+    async def observe_response(self, response, account_id="default") -> None:
+        await self._persist(response_signal(response), response, account_id)
 
-    async def observe_error(self, exc: Exception, response=None) -> None:
+    async def observe_error(self, exc: Exception, response=None, account_id="default") -> None:
         attached = getattr(exc, "response", None)
-        await self._persist(error_signal(exc), attached if attached is not None else response)
+        await self._persist(error_signal(exc), attached if attached is not None else response, account_id)
 
-    async def observe_result(self, result, response=None) -> None:
-        await self._persist(result_signal(result), response)
+    async def observe_result(self, result, response=None, account_id="default") -> None:
+        await self._persist(result_signal(result), response, account_id)
 
 
 class BoundRequestControl:
@@ -177,10 +184,10 @@ class BoundRequestControl:
         # Preserve headers for business-level limiting carried by HTTP 200.
         # Do not read .text/.content: the SKU response may still be streaming.
         self._response = response
-        self._call(self.guard.observe_response, response)
+        self._call(self.guard.observe_response, response, self.account_id)
 
     def observe_error(self, exc: Exception) -> None:
-        self._call(self.guard.observe_error, exc, self._response)
+        self._call(self.guard.observe_error, exc, self._response, self.account_id)
 
     def observe_result(self, result) -> None:
-        self._call(self.guard.observe_result, result, self._response)
+        self._call(self.guard.observe_result, result, self._response, self.account_id)

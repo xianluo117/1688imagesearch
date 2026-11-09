@@ -23,6 +23,7 @@ def make_settings(path, **kwargs):
     return Settings(cookie_upload_api_key="u" * 24, search_api_key="s" * 24,
                     cookie_encryption_key="offline", database_path=path,
                     request_interval_min_seconds=0.02, request_interval_max_seconds=0.02,
+                    account_request_interval_min_seconds=0.02, account_request_interval_max_seconds=0.02,
                     **kwargs)
 
 
@@ -153,16 +154,18 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             return RAW
 
         task_id = await self.db.create_sku_task("blocked")
-        scheduler = self.scheduler(fetch, settings=replace(self.settings, sku_task_timeout_seconds=0.2))
+        scheduler = self.scheduler(fetch, settings=replace(self.settings, sku_task_timeout_seconds=10))
+        offset = 0
+        scheduler.guard.clock = lambda: time.monotonic() + offset
         await scheduler.start()
         await eventually(entered.is_set)
-        await asyncio.sleep(0.3)
+        offset = 11
         release.set()
         task = await scheduler.wait_for_task(task_id, timeout=3)
         self.assertEqual(task.error_code, "TASK_TIMEOUT")
         self.assertIsNone(task.result)
 
-    async def test_shutdown_while_paused_unblocks_callback_keeps_queued(self):
+    async def test_shutdown_after_account_pause_keeps_bound_tasks_queued(self):
         waiting = threading.Event()
 
         def fetch(url, records, control):
@@ -177,10 +180,12 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         scheduler = self.scheduler(fetch)
         await scheduler.start()
         await eventually(waiting.is_set)
+        result = await scheduler.wait_for_task(first, timeout=2)
+        self.assertEqual(result.status, "failed")
         await asyncio.wait_for(scheduler.stop(), 2)
-        self.assertEqual((await self.db.get_queue_task(first)).error_code, "SCHEDULER_STOPPING")
         self.assertEqual((await self.db.get_queue_task(second)).status, "queued")
-        self.assertEqual((await self.db.get_scheduler_state()).state, "paused")
+        self.assertEqual((await self.db.get_account_state("default"))["state"], "paused")
+        self.assertEqual((await self.db.get_scheduler_state()).state, "normal")
         self.assertFalse(self.db.accepting)
 
     async def test_shutdown_waits_for_actual_network_and_survives_cancelled_stop_waiter(self):
@@ -235,7 +240,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.result["status"], "partial_success")
 
-    async def test_protection_wait_does_not_consume_sku_budget(self):
+    async def test_account_pause_exits_attempt_instead_of_waiting_for_resume(self):
         waiting = threading.Event()
 
         def fetch(url, records, control):
@@ -249,10 +254,11 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         scheduler = self.scheduler(fetch, settings=replace(self.settings, sku_task_timeout_seconds=0.3))
         await scheduler.start()
         await eventually(waiting.is_set)
-        await asyncio.sleep(0.6)
-        await scheduler.resume()
         result = await scheduler.wait_for_task(task_id, timeout=3)
-        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual((await self.db.get_account_state("default"))["state"], "paused")
+        self.assertEqual((await self.db.get_scheduler_state()).state, "normal")
+        self.assertEqual(len(await self.db.list_task_attempts(task_id)), 1)
 
     async def test_download_counts_budget_but_does_not_take_request_permit(self):
         upload = await self.db.create_upload_task("image")
@@ -306,11 +312,13 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             return RAW
 
         task_id = await self.db.create_sku_task("inflight")
-        scheduler = self.scheduler(fetch, settings=replace(self.settings, sku_task_timeout_seconds=0.2))
+        scheduler = self.scheduler(fetch, settings=replace(self.settings, sku_task_timeout_seconds=10))
+        offset = 0
+        scheduler.guard.clock = lambda: time.monotonic() + offset
         await scheduler.start()
         await eventually(entered.is_set)
         await self.db.pause_scheduler("other task requires login")
-        await asyncio.sleep(0.3)
+        offset = 11
         self.assertEqual((await self.db.get_queue_task(task_id)).status, "running")
         release.set()
         task = await scheduler.wait_for_task(task_id, timeout=3)
@@ -370,7 +378,106 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(factory.call_args.kwargs["request_control"])
         self.assertEqual(record.result, result.to_dict())
         self.assertEqual(record.status, "failed")
-        self.assertEqual((await self.db.get_scheduler_state()).state, "cooldown")
+        self.assertEqual((await self.db.get_account_state("default"))["state"], "cooldown")
+        self.assertEqual((await self.db.get_scheduler_state()).state, "normal")
+
+    async def test_account_risk_releases_slot_retries_elsewhere_and_keeps_versions(self):
+        await self.db.store_cookie(b"b", cookie_count=1, exported_at=None, account_id="other")
+        task_id = await self.db.create_sku_task("risk", account_id="default")
+        bound = await self.db.get_queue_task(task_id)
+        await self.db.store_cookie(b"updated", cookie_count=1, exported_at=None)
+        calls = []
+
+        def fetch(url, records, control):
+            control.before_request()
+            calls.append(control.account_id)
+            if control.account_id == "default":
+                control.observe_result({"status": "login_required"})
+                control.before_request()
+                self.fail("paused account must not issue another request")
+            return RAW
+
+        scheduler = self.scheduler(fetch)
+        await scheduler.start()
+        result = await scheduler.wait_for_task(task_id, timeout=3)
+        self.assertEqual(result.status, "succeeded")
+        self.assertIsNone(result.error_code)
+        self.assertEqual(calls, ["default", "other"])
+        attempts = await self.db.list_task_attempts(task_id)
+        self.assertEqual([a["status"] for a in attempts], ["failed", "succeeded"])
+        self.assertEqual(attempts[0]["cookie_version"], bound.payload["cookie_version"])
+        self.assertEqual((await self.db.get_account_state("default"))["state"], "paused")
+        self.assertEqual((await self.db.get_account_state("other"))["state"], "normal")
+        self.assertEqual((await self.db.get_scheduler_state()).state, "normal")
+        await self.db.pause_account("other", "risk")
+        self.assertIsNone(await self.db.create_sku_task("unavailable"))
+        self.assertEqual(calls, ["default", "other"])
+
+    async def test_product_retry_reuploads_without_changing_parent_or_sibling(self):
+        await self.db.store_cookie(b"b", cookie_count=1, exported_at=None, account_id="other")
+        parent = await self.db.create_upload_task("original-url", account_id="default")
+        await self.db.claim_next_task()
+        await self.db.finish_queue_task(parent, status="succeeded", result={"image_id": "old", "search_page_url": "old-url"})
+        original = await self.db.get_upload_task(parent)
+        product, _ = await self.db.create_product_task(parent)
+        sibling, _ = await self.db.create_product_task(parent)
+        self.assertEqual((await self.db.get_queue_task(product)).account_id, "default")
+        self.assertEqual((await self.db.get_queue_task(product)).payload["cookie_version"], original.cookie_version)
+        # Product creation inherits its parent and must not consume automatic rotation.
+        next_id = await self.db.create_sku_task("rotation")
+        self.assertEqual((await self.db.get_queue_task(next_id)).account_id, "default")
+        await self.db.cancel_queue_task(next_id)
+        calls = []
+
+        def upload(records, content, control):
+            control.before_request()
+            calls.append(("upload", control.account_id, content))
+            return {"image_id": "new", "search_page_url": "new-url"}
+
+        def search(records, image_id, url, control):
+            control.before_request()
+            calls.append(("search", control.account_id, image_id))
+            if control.task_id == product and control.account_id == "default":
+                raise ValueError("first search failed")
+            return {"image_id": image_id, "search_page_url": url, "products": [{"title": "ok"}]}
+
+        scheduler = self.scheduler()
+        with patch("api.worker.download_image", AsyncMock(return_value=b"original")) as download, patch.object(
+            scheduler.executor, "upload_sync", side_effect=upload
+        ), patch.object(scheduler.executor, "product_sync", side_effect=search):
+            await scheduler.start()
+            result = await scheduler.wait_for_task(product, timeout=3)
+            other = await scheduler.wait_for_task(sibling, timeout=3)
+        self.assertEqual(result.result["image_id"], "new")
+        self.assertEqual(other.result["image_id"], "old")
+        self.assertEqual(await self.db.get_upload_task(parent), original)
+        self.assertEqual(calls[:3], [("search", "default", "old"), ("upload", "other", b"original"), ("search", "other", "new")])
+        download.assert_awaited_once()
+        self.assertEqual(download.call_args.args[0], "original-url")
+        attempts = await self.db.list_task_attempts(product)
+        self.assertEqual([a["account_id"] for a in attempts], ["default", "other"])
+        self.assertEqual(attempts[1]["result"]["image_id"], "new")
+
+    async def test_upload_retry_uses_other_account_and_second_failure_is_terminal(self):
+        await self.db.store_cookie(b"b", cookie_count=1, exported_at=None, account_id="other")
+        task_id = await self.db.create_upload_task("image", account_id="default")
+        calls = []
+
+        def upload(records, content, control):
+            control.before_request()
+            calls.append(control.account_id)
+            raise ValueError("failed " + control.account_id)
+
+        scheduler = self.scheduler()
+        with patch("api.worker.download_image", AsyncMock(return_value=b"image")) as download, patch.object(
+            scheduler.executor, "upload_sync", side_effect=upload
+        ):
+            await scheduler.start()
+            result = await scheduler.wait_for_task(task_id, timeout=3)
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(calls, ["default", "other"])
+        self.assertEqual(download.await_count, 2)
+        self.assertEqual(len(await self.db.list_task_attempts(task_id)), 2)
 
     async def test_legacy_pools_cannot_start_and_duplicate_scheduler_rejected(self):
         for cls in (UploadWorkerPool, ProductWorkerPool):

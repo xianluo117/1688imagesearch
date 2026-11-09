@@ -127,11 +127,11 @@ class UnifiedQueueScheduler:
             result = await self.executor.execute(task, control, run_sync, self.execute_sku_sync)
             if hasattr(result, "to_dict"):
                 result = result.to_dict()
-            await self.guard.observe_result(result)
+            await self.guard.observe_result(result, account_id=task.account_id)
             await self.guard.checkpoint(task.task_id, budget)
         except Exception as exc:
             failure = exc
-            await self.guard.observe_error(exc)
+            await self.guard.observe_error(exc, account_id=task.account_id)
         finally:
             done.set()
             await watcher
@@ -150,7 +150,8 @@ class UnifiedQueueScheduler:
             }:
                 asyncio.create_task(
                     self.alert_callback(
-                        code, task_kind=task.kind, task_id=task.task_id, message=message,
+                        f"{task.account_id}:{code}", task_kind=task.kind, task_id=task.task_id,
+                        message=f"账号 {task.account_id} / 尝试 {task.payload.get('attempt', 1)}: {message}",
                     ),
                     name=f"dingtalk-alert-{task.task_id}",
                 )

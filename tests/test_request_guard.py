@@ -36,6 +36,9 @@ class FakeStore:
     async def is_queue_cancel_requested(self, task_id):
         return self.cancel
 
+    async def get_account_state(self, account_id):
+        return {"enabled": True, "state": "normal"}
+
     async def get_scheduler_state(self, **kwargs):
         if self.until and self.clock() >= self.until:
             self.state = "normal"
@@ -139,22 +142,30 @@ class PersistentSignalsTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(temp.cleanup)
         self.store = Database(Path(temp.name) / "queue.db")
         await self.store.initialize()
+        await self.store.store_cookie(b"offline", cookie_count=1, exported_at=None)
         self.guard = RequestGuard(self.store, settings())
+
+    async def account_state(self):
+        return SimpleNamespace(**await self.store.get_account_state("default"))
+
+    async def resume_account(self):
+        await self.store.store_cookie(b"offline", cookie_count=1, exported_at=None, confirmed_login=True)
 
     async def test_rate_retry_after_and_pause_priority_survive_restart(self):
         now = time.time()
         response = SimpleNamespace(status_code=429, headers={"Retry-After": "120"}, url="https://detail.1688.com/offer/1.html")
         await self.guard.observe_response(response)
-        state = await self.store.get_scheduler_state()
+        state = await self.account_state()
         self.assertGreaterEqual(state.until, now + 120)
         await self.guard.observe_error(RateLimitError("rate"))
-        self.assertGreaterEqual((await self.store.get_scheduler_state()).until, state.until)
+        self.assertGreaterEqual((await self.account_state()).until, state.until)
         await self.guard.observe_result({"status": "login_required", "reason": "http_429"})
         await self.guard.observe_response(response)
         await self.store.initialize()
-        self.assertEqual((await self.store.get_scheduler_state()).state, "paused")
-        await self.store.resume_scheduler()
+        self.assertEqual((await self.account_state()).state, "paused")
         self.assertEqual((await self.store.get_scheduler_state()).state, "normal")
+        await self.resume_account()
+        self.assertEqual((await self.account_state()).state, "normal")
 
     async def test_business_limit_uses_retry_after_from_http_200(self):
         task_id = await self.store.create_sku_task("offline")
@@ -163,7 +174,7 @@ class PersistentSignalsTests(unittest.IsolatedAsyncioTestCase):
         now = time.time()
         await asyncio.to_thread(control.observe_response, response)
         await asyncio.to_thread(control.observe_error, RateLimitError("business rate limit"))
-        self.assertGreaterEqual((await self.store.get_scheduler_state()).until, now + 180)
+        self.assertGreaterEqual((await self.account_state()).until, now + 180)
 
     async def test_observers_cover_error_result_and_redirect_without_reading_body(self):
         cases = [
@@ -178,10 +189,11 @@ class PersistentSignalsTests(unittest.IsolatedAsyncioTestCase):
         ]
         for method, value, expected in cases:
             with self.subTest(method=method, value=value):
-                await self.store.resume_scheduler()
+                await self.resume_account()
                 await getattr(self.guard, method)(value)
-                self.assertEqual((await self.store.get_scheduler_state()).state, expected)
-        await self.store.resume_scheduler()
+                self.assertEqual((await self.account_state()).state, expected)
+                self.assertEqual((await self.store.get_scheduler_state()).state, "normal")
+        await self.resume_account()
         await self.guard.observe_result({"status": "success", "skus": [{"title": "CAPTCHA"}]})
         await self.guard.observe_error(ValueError("ordinary parse error"))
         self.assertEqual((await self.store.get_scheduler_state()).state, "normal")
@@ -191,7 +203,7 @@ class PersistentSignalsTests(unittest.IsolatedAsyncioTestCase):
         date = format_datetime(datetime.fromtimestamp(now + 180, timezone.utc), usegmt=True)
         response = SimpleNamespace(status_code=429, headers={"Retry-After": date}, url="")
         await self.guard.observe_response(response)
-        self.assertGreater((await self.store.get_scheduler_state()).until, now + 178)
+        self.assertGreater((await self.account_state()).until, now + 178)
         for value in ("NaN", "inf", "-1", "1.5", "tomorrow", "9" * 1000, None):
             self.assertIsNone(retry_after_seconds(value, now))
         self.assertEqual(retry_after_seconds("0", now), 0)

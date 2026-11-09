@@ -31,6 +31,17 @@ CREATE TABLE IF NOT EXISTS queue_idempotency (
     payload_json TEXT NOT NULL,
     task_id TEXT NOT NULL REFERENCES queue_tasks(task_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS queue_attempts (
+    task_id TEXT NOT NULL REFERENCES queue_tasks(task_id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL,
+    account_id TEXT NOT NULL,
+    cookie_version INTEGER,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    error_message TEXT,
+    result_json TEXT,
+    PRIMARY KEY(task_id, attempt)
+);
 CREATE TABLE IF NOT EXISTS queue_scheduler (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     state TEXT NOT NULL CHECK(state IN ('normal','cooldown','paused')),
@@ -99,14 +110,28 @@ async def initialize_queue(db: aiosqlite.Connection, now: float) -> None:
                   row["result_json"] if kind == "product" else None)
         # NOT EXISTS avoids consuming AUTOINCREMENT values on subsequent startups.
         await db.execute("""
-            INSERT INTO queue_tasks(task_id,kind,status,payload_json,dependency_id,result_json,
+            INSERT INTO queue_tasks(task_id,kind,account_id,status,payload_json,dependency_id,result_json,
                 cancel_requested,error_code,error_message,created_at,updated_at,started_at,finished_at)
-            SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
+            SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
                 (SELECT 1 FROM queue_tasks WHERE task_id=?)
-        """, (task_id, kind, row["status"], encode(payload),
+        """, (task_id, kind, row["account_id"], row["status"], encode(payload),
               row["upload_task_id"] if kind == "product" else None, result,
               row["cancel_requested"], row["error_code"], row["error_message"],
               row["created_at"], row["updated_at"], row["started_at"], row["finished_at"], task_id))
+    await db.execute("""
+        UPDATE upload_tasks SET cookie_version=(
+            SELECT version FROM cookie_versions c WHERE c.account_id=upload_tasks.account_id AND c.is_active=1)
+        WHERE cookie_version IS NULL AND status IN ('queued','running')
+    """)
+    await db.execute("""
+        UPDATE queue_tasks SET payload_json=json_set(payload_json, '$.cookie_version',
+            CASE kind
+                WHEN 'upload' THEN (SELECT cookie_version FROM upload_tasks u WHERE u.task_id=queue_tasks.task_id)
+                WHEN 'product' THEN (SELECT cookie_version FROM product_tasks p WHERE p.task_id=queue_tasks.task_id)
+                ELSE (SELECT version FROM cookie_versions c WHERE c.account_id=queue_tasks.account_id AND c.is_active=1)
+            END)
+        WHERE status IN ('queued','running') AND json_extract(payload_json, '$.cookie_version') IS NULL
+    """)
     for table in ("upload_tasks", "product_tasks", "queue_tasks"):
         await db.execute(f"""
             UPDATE {table} SET status='cancelled', error_code='TASK_CANCELLED',

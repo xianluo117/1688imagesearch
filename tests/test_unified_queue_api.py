@@ -120,12 +120,10 @@ class UnifiedQueueApiTests(unittest.IsolatedAsyncioTestCase):
         body = (await self.poll(created.json()["task_id"])).json()
         self.assertEqual(body["status"], "failed")
         self.assertEqual(body["result"]["status"], "login_required")
-        self.assertEqual(body["scheduler"]["state"], "paused")
-        queued = await self.submit()
-        self.assertEqual(queued.json()["status"], "queued")
-        response = await self.client.delete(queued.headers["location"], headers=HEADERS)
-        self.assertEqual(response.json()["status"], "cancelled")
-        self.assertTrue(response.json()["cancel_requested"])
+        self.assertEqual(body["scheduler"]["state"], "normal")
+        self.assertEqual((await self.app.state.database.get_account_state("default"))["state"], "paused")
+        rejected = await self.submit()
+        self.assertEqual(rejected.status_code, 503)
         self.fake.fetch.assert_called_once()
 
     async def test_running_cancel_keeps_capacity_until_actual_return(self):

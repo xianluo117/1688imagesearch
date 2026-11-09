@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>1688 同步</title>
+<style>body{width:340px;padding:14px;font:14px sans-serif}label{display:block;margin:12px 0}input{box-sizing:border-box;width:100%;padding:7px;margin-top:5px}button{padding:8px;margin-right:8px}#result{white-space:pre-wrap;overflow-wrap:anywhere}</style></head>
+<body><div>最近同步账号：<span id="account">未同步</span></div>
+<form id="config"><label>服务地址<input id="server" type="url" required></label>
+<label>上传密钥<input id="key" type="password" required></label>
+<label>检测页面<input id="checkUrl" type="url" required></label>
+<button type="submit">保存配置</button><button id="sync" type="button">手动上传</button></form>
+<p id="result"></p><script src="popup.js" type="module"></script></body></html>

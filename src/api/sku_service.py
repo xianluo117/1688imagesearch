@@ -5,7 +5,6 @@ from pydantic import TypeAdapter
 
 from product_sku.models import SkuResult
 
-from .cookie_store import CookieStoreError
 from .queue_store import IdempotencyConflict, QueueNotAccepting
 
 _RESULT = TypeAdapter(SkuResult)
@@ -41,20 +40,18 @@ class ProductSkuService:
     async def submit(self, url: str, *, idempotency_key: str | None = None, account_id: str | None = None) -> str:
         if not self.database.accepting:
             raise SkuServiceError(503, "SKU_SERVICE_STOPPING", "SKU 服务正在停止")
-        selected_account = await self.database.select_account(account_id)
-        if selected_account is None:
-            raise SkuServiceError(503, "ACCOUNT_UNAVAILABLE", "没有可用的 1688 账号")
         try:
-            await self.cookie_store.load_active(selected_account)
-        except CookieStoreError:
-            raise SkuServiceError(503, "COOKIE_UNAVAILABLE", "服务器没有可用的 1688 Cookie") from None
-        try:
-            task_id = await self.database.create_sku_task(url, idempotency_key=idempotency_key, account_id=selected_account)
+            task_id, error = await self.database._enqueue(
+                "sku", {"product_url": url}, max_active=None,
+                idempotency_key=idempotency_key, account_id=account_id,
+            )
         except IdempotencyConflict:
             raise SkuServiceError(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同参数") from None
         except QueueNotAccepting:
             raise SkuServiceError(503, "SKU_SERVICE_STOPPING", "SKU 服务正在停止") from None
         if task_id is None:
+            if error == "ACCOUNT_UNAVAILABLE":
+                raise SkuServiceError(503, error, "没有可用的 1688 账号")
             raise SkuServiceError(429, "QUEUE_FULL", "任务队列已满")
         return task_id
 

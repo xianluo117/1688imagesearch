@@ -9,6 +9,7 @@ from typing import Any, Literal
 import aiosqlite
 
 from .dingtalk import DingTalkConfig
+from .account_store import AccountStoreMixin, initialize_accounts
 from .queue_schema import initialize_queue
 from .queue_store import QueueStoreMixin
 
@@ -51,7 +52,7 @@ class ProductTaskRecord:
     finished_at: float | None
 
 
-class Database(QueueStoreMixin):
+class Database(QueueStoreMixin, AccountStoreMixin):
     def __init__(self, path: str | Path, *, queue_capacity: int = 100) -> None:
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be positive")
@@ -157,6 +158,7 @@ class Database(QueueStoreMixin):
             account_columns = {row[1] for row in await cursor.fetchall()}
             if "last_selected_at" not in account_columns:
                 await db.execute("ALTER TABLE accounts ADD COLUMN last_selected_at REAL NOT NULL DEFAULT 0")
+            await initialize_accounts(db)
             await db.commit()
             await db.executescript(
                 """
@@ -240,6 +242,8 @@ class Database(QueueStoreMixin):
         cookie_count: int,
         exported_at: str | None,
         account_id: str = "default",
+        display_name: str | None = None,
+        confirmed_login: bool = False,
     ) -> int:
         now = time.time()
         async with aiosqlite.connect(self.path) as db:
@@ -255,6 +259,10 @@ class Database(QueueStoreMixin):
                 (account_id, encrypted_payload, cookie_count, exported_at, now),
             )
             version = int(cursor.lastrowid)
+            if display_name is not None:
+                await db.execute("UPDATE accounts SET display_name=?, updated_at=? WHERE account_id=?", (display_name, now, account_id))
+            if confirmed_login:
+                await db.execute("UPDATE accounts SET state='normal', reason=NULL, until=NULL, updated_at=? WHERE account_id=?", (now, account_id))
             await db.commit()
             return version
 
@@ -298,19 +306,7 @@ class Database(QueueStoreMixin):
     async def select_account(self, account_id: str | None = None) -> str | None:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
-            if account_id:
-                cursor = await db.execute("""
-                    SELECT a.account_id FROM accounts a
-                    JOIN cookie_versions c ON c.account_id=a.account_id AND c.is_active=1
-                    WHERE a.account_id=? AND a.enabled=1
-                """, (account_id,))
-            else:
-                cursor = await db.execute("""
-                    SELECT a.account_id FROM accounts a
-                    JOIN cookie_versions c ON c.account_id=a.account_id AND c.is_active=1
-                    WHERE a.enabled=1 ORDER BY a.last_selected_at, a.account_id LIMIT 1
-                """)
-            row = await cursor.fetchone()
+            row = await self._select_account_in_transaction(db, account_id)
             if row is None:
                 await db.rollback()
                 return None

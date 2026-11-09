@@ -49,6 +49,7 @@ tr:last-child td { border-bottom: 0; }
 <div id="message"></div>
 <div class="cards" id="cards"></div>
 <div class="status" id="scheduler"></div>
+<div class="status" id="accounts"></div>
 <div class="table-wrap"><table>
 <thead><tr><th><input id="selectAll" type="checkbox"></th><th>序号</th><th>类型</th><th>状态</th><th>任务 ID</th><th>依赖任务</th><th>创建时间</th><th>开始时间</th><th>取消请求</th></tr></thead>
 <tbody id="tasks"><tr><td colspan="9" class="empty">请输入 API Key 后加载</td></tr></tbody>
@@ -63,6 +64,7 @@ $('apiKey').value = sessionStorage.getItem('queue-api-key') || '';
 function headers() { return { 'X-API-Key': $('apiKey').value.trim() }; }
 function time(value) { return value ? new Date(value * 1000).toLocaleString() : '-'; }
 function showError(error) { $('message').textContent = error; }
+function text(value) { const node = document.createElement('span'); node.textContent = value ?? ''; return node.innerHTML; }
 function renderSummary(snapshot) {
   const c = snapshot.counts;
   $('cards').innerHTML = counts.map(key => `<div class="card"><small>${labels[key]}</small><strong>${c[key] || 0}</strong></div>`).join('') +
@@ -78,16 +80,19 @@ function renderTasks() {
   $('tasks').innerHTML = rows.length ? rows.map(task => `<tr>
     <td><input class="task-check" type="checkbox" value="${task.task_id}"></td><td>${task.seq}</td><td>${task.kind}</td>
     <td><span class="badge ${task.status}">${labels[task.status] || task.status}</span></td>
-    <td title="${task.task_id}">${task.task_id.slice(0, 8)}…</td><td>${task.dependency_id ? task.dependency_id.slice(0, 8) + '…' : '-'}</td>
+    <td title="${task.task_id}">${task.task_id.slice(0, 8)}…<br>${text(task.account_id)} · 第 ${task.attempt_count} 次
+    <details><summary>尝试结果</summary>${task.attempts.map(a => text(`${a.attempt}: ${a.account_id} / ${a.status} / ${a.error_message || '-'}`)).join('<br>')}</details></td><td>${task.dependency_id ? task.dependency_id.slice(0, 8) + '…' : '-'}</td>
     <td>${time(task.created_at)}</td><td>${time(task.started_at)}</td><td>${task.cancel_requested ? '是' : '否'}</td></tr>`).join('') : '<tr><td colspan="9" class="empty">暂无排队或执行中的任务</td></tr>';
 }
 async function refresh() {
   if (!$('apiKey').value.trim()) return;
   try {
     const options = { headers: headers() };
-    const [summaryResponse, taskResponse] = await Promise.all([fetch('/api/v1/queue', options), fetch('/api/v1/queue/tasks', options)]);
+    const [summaryResponse, taskResponse, accountsResponse] = await Promise.all([fetch('/api/v1/queue', options), fetch('/api/v1/queue/tasks?status=all', options), fetch('/api/v1/accounts', options)]);
     if (!summaryResponse.ok || !taskResponse.ok) throw new Error(`请求失败（${summaryResponse.status}/${taskResponse.status}）`);
     renderSummary(await summaryResponse.json());
+    if (!accountsResponse.ok) throw new Error(`账号查询失败（${accountsResponse.status}）`);
+    $('accounts').textContent = (await accountsResponse.json()).accounts.map(a => `${a.display_name}: ${a.state}${a.reason ? ' / ' + a.reason : ''}`).join('　');
     taskRows = (await taskResponse.json()).tasks;
     renderTasks(); showError('');
   } catch (error) { showError(error.message); }

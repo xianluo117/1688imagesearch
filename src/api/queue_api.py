@@ -25,6 +25,9 @@ class SchedulerStatus(BaseModel):
 
 class SkuTaskResponse(BaseModel):
     task_id: str
+    account_id: str
+    attempt_count: int
+    attempts: list[dict]
     status: TaskStatus
     cancel_requested: bool
     created_at: float
@@ -53,6 +56,8 @@ async def queue_task_summary(task_id: str, database) -> dict | None:
         "seq": task.seq,
         "task_id": task.task_id,
         "account_id": task.account_id,
+        "attempt_count": task.payload.get("attempt", 1),
+        "attempts": await database.list_task_attempts(task.task_id),
         "kind": task.kind,
         "status": task.status,
         "dependency_id": task.dependency_id,
@@ -73,6 +78,8 @@ async def sku_task_response(task, database) -> SkuTaskResponse:
         raise query_failed() from None
     return SkuTaskResponse(
         task_id=task.task_id, status=task.status, cancel_requested=task.cancel_requested,
+        account_id=task.account_id, attempt_count=task.payload.get("attempt", 1),
+        attempts=await database.list_task_attempts(task.task_id),
         created_at=task.created_at, updated_at=task.updated_at, started_at=task.started_at,
         finished_at=task.finished_at, query_url=task_location(task.task_id), result=result,
         error={"code": task.error_code, "message": task.error_message or "任务执行失败"} if task.error_code else None,
@@ -89,7 +96,9 @@ async def get_sku_task(database, task_id):
 
 @router.get("/api/v1/accounts")
 async def list_accounts(request: Request):
-    return {"accounts": await request.app.state.database.list_accounts()}
+    database = request.app.state.database
+    accounts = await database.list_accounts()
+    return {"accounts": [{**account, **await database.get_account_state(account["account_id"])} for account in accounts]}
 
 
 @router.post("/api/v2/sku-tasks", response_model=SkuTaskResponse, status_code=202)
@@ -133,7 +142,9 @@ async def queue_tasks(
     status: Literal["active", "all"] = Query(default="active"),
 ):
     statuses = ("queued", "running") if status == "active" else None
-    return {"tasks": await request.app.state.database.list_queue_tasks(statuses)}
+    database = request.app.state.database
+    tasks = await database.list_queue_tasks(statuses)
+    return {"tasks": [await queue_task_summary(task["task_id"], database) for task in tasks]}
 
 
 @router.post("/api/v1/queue/cancel")
