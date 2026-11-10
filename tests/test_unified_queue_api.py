@@ -189,12 +189,12 @@ class UnifiedQueueApiTests(unittest.IsolatedAsyncioTestCase):
         await self.app.state.database.pause_scheduler("arrange")
         order = []
 
-        def upload(records, content, control):
+        def upload(records, content, control, proxy_url=""):
             order.append("upload")
             self.assertIs(control.guard, scheduler.guard)
             return {"image_id": "image", "search_page_url": "https://example.com/search"}
 
-        def product(records, image_id, search_page_url, control):
+        def product(records, image_id, search_page_url, control, proxy_url=""):
             order.append("product")
             self.assertIs(control.guard, scheduler.guard)
             return {"image_id": image_id, "search_page_url": search_page_url, "found": 0, "products": []}

@@ -429,12 +429,12 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         await self.db.cancel_queue_task(next_id)
         calls = []
 
-        def upload(records, content, control):
+        def upload(records, content, control, proxy_url=""):
             control.before_request()
             calls.append(("upload", control.account_id, content))
             return {"image_id": "new", "search_page_url": "new-url"}
 
-        def search(records, image_id, url, control):
+        def search(records, image_id, url, control, proxy_url=""):
             control.before_request()
             calls.append(("search", control.account_id, image_id))
             if control.task_id == product and control.account_id == "default":
@@ -463,7 +463,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         task_id = await self.db.create_upload_task("image", account_id="default")
         calls = []
 
-        def upload(records, content, control):
+        def upload(records, content, control, proxy_url=""):
             control.before_request()
             calls.append(control.account_id)
             raise ValueError("failed " + control.account_id)

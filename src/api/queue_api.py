@@ -101,6 +101,20 @@ async def list_accounts(request: Request):
     return {"accounts": [{**account, **await database.get_account_state(account["account_id"])} for account in accounts]}
 
 
+class AccountProxyRequest(BaseModel):
+    proxy_url: str = ""
+
+
+@router.put("/api/v1/accounts/{account_id}/proxy")
+async def save_account_proxy(account_id: str, body: AccountProxyRequest, request: Request):
+    proxy_url = body.proxy_url.strip()
+    if proxy_url and not proxy_url.startswith(("http://", "socks5://")):
+        raise HTTPException(400, detail="代理地址须以 http:// 或 socks5:// 开头")
+    if not await request.app.state.database.set_account_proxy(account_id, proxy_url):
+        raise HTTPException(404, detail="账号不存在")
+    return {"account_id": account_id, "proxy_url": proxy_url}
+
+
 @router.post("/api/v2/sku-tasks", response_model=SkuTaskResponse, status_code=202)
 async def create_sku_task(body: ProductSkuRequest, request: Request, response: Response):
     url, key = canonical_url(body.product_url), idempotency_key(request)

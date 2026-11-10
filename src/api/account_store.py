@@ -11,6 +11,7 @@ async def initialize_accounts(db):
         ("state", "TEXT NOT NULL DEFAULT 'normal'"),
         ("reason", "TEXT"),
         ("until", "REAL"),
+        ("proxy_url", "TEXT NOT NULL DEFAULT ''"),
     ):
         if name not in columns:
             await db.execute(f"ALTER TABLE accounts ADD COLUMN {name} {declaration}")
@@ -19,6 +20,21 @@ async def initialize_accounts(db):
 
 
 class AccountStoreMixin:
+    async def get_account_proxy(self, account_id):
+        async with self._queue_connection() as db:
+            cursor = await db.execute("SELECT proxy_url FROM accounts WHERE account_id=?", (account_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else ""
+
+    async def set_account_proxy(self, account_id, proxy_url):
+        async with self._queue_connection() as db:
+            cursor = await db.execute(
+                "UPDATE accounts SET proxy_url=?, updated_at=? WHERE account_id=?",
+                (proxy_url, time.time(), account_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def _select_account_in_transaction(self, db, account_id=None, *, exclude=None):
         now = time.time()
         await db.execute("UPDATE accounts SET state='normal', reason=NULL, until=NULL, updated_at=? WHERE state='cooldown' AND until<=?", (now, now))
@@ -42,7 +58,7 @@ class AccountStoreMixin:
 
     async def get_account_state(self, account_id):
         async with self._queue_connection() as db:
-            cursor = await db.execute("SELECT account_id, display_name, enabled, state, reason, until FROM accounts WHERE account_id=?", (account_id,))
+            cursor = await db.execute("SELECT account_id, display_name, enabled, state, reason, until, proxy_url FROM accounts WHERE account_id=?", (account_id,))
             row = await cursor.fetchone()
             if row is None:
                 return None

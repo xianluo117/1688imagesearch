@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from functools import partial
 from urllib.parse import urlencode
 
 from image_search import ImageSearchClient, SearchOptions
@@ -58,6 +59,7 @@ class QueueTaskExecutor:
         self.database, self.cookie_store, self.settings = database, cookie_store, settings
 
     async def execute(self, task, control, run_sync, execute_sku_sync):
+        proxy_url = await self.database.get_account_proxy(task.account_id)
         if task.kind == "sku":
             cookie_version = task.payload.get("cookie_version")
             if cookie_version is None:
@@ -66,6 +68,7 @@ class QueueTaskExecutor:
                     raise CookieStoreError("尚未上传 1688 Cookie")
                 cookie_version = row[0]
             _, records = await self.cookie_store.load_version(cookie_version)
+            execute_sku_sync = execute_sku_sync or partial(self.sku_sync, proxy_url=proxy_url)
             return await run_sync(execute_sku_sync, task.payload["product_url"], records, control)
         if task.kind == "upload":
             upload = await self.database.get_upload_task(task.task_id)
@@ -78,7 +81,7 @@ class QueueTaskExecutor:
                 connect_timeout=self.settings.download_connect_timeout,
                 total_timeout=self.settings.download_timeout,
             )
-            return await run_sync(self.upload_sync, records, content, control)
+            return await run_sync(self.upload_sync, records, content, control, proxy_url)
         product = await self.database.get_product_task(task.task_id)
         upload = await self.database.get_upload_task(task.dependency_id)
         if product is None or upload is None or upload.status != "succeeded" or not upload.image_id or not upload.search_page_url:
@@ -91,40 +94,40 @@ class QueueTaskExecutor:
                 connect_timeout=self.settings.download_connect_timeout,
                 total_timeout=self.settings.download_timeout,
             )
-            uploaded = await run_sync(self.upload_sync, records, content, control)
+            uploaded = await run_sync(self.upload_sync, records, content, control, proxy_url)
             image_id, search_page_url = uploaded["image_id"], uploaded["search_page_url"]
-        return await run_sync(self.product_sync, records, image_id, search_page_url, control)
+        return await run_sync(self.product_sync, records, image_id, search_page_url, control, proxy_url)
 
-    def _image_client(self, records, control):
+    def _image_client(self, records, control, proxy_url=""):
         return ImageSearchClient(
             cookie_records=records,
             options=SearchOptions(result_limit=3, ready_retries=self.settings.search_ready_retries,
                                   request_interval=self.settings.search_ready_interval,
                                   max_image_bytes=self.settings.max_image_bytes),
             timeout=self.settings.search_http_timeout,
-            network_retries=0, request_control=control,
+            network_retries=0, request_control=control, proxy_url=proxy_url,
         )
 
-    def upload_sync(self, records, content, control):
-        client = self._image_client(records, control)
+    def upload_sync(self, records, content, control, proxy_url=""):
+        client = self._image_client(records, control, proxy_url)
         try:
             image_id = client.upload_image_bytes(content).image_id
             return {"image_id": image_id, "search_page_url": build_search_page_url(image_id)}
         finally:
             client.session.close()
 
-    def product_sync(self, records, image_id, search_page_url, control):
-        client = self._image_client(records, control)
+    def product_sync(self, records, image_id, search_page_url, control, proxy_url=""):
+        client = self._image_client(records, control, proxy_url)
         try:
             result = client.search_image_id(image_id)
             return normalize_product_result(result, search_page_url=search_page_url)
         finally:
             client.session.close()
 
-    def sku_sync(self, url, records, control):
+    def sku_sync(self, url, records, control, proxy_url=""):
         try:
             client = ProductSkuClient(cookie_records=records, timeout=self.settings.sku_http_timeout,
-                                      network_retries=0, request_control=control)
+                                      network_retries=0, request_control=control, proxy_url=proxy_url)
         except ValueError:
             raise CookieStoreError("服务器没有可用的 1688 Cookie") from None
         with client as active_client:

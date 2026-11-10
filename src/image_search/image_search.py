@@ -92,12 +92,15 @@ class ImageSearchClient:
         timeout: float = 30.0,
         network_retries: int = 2,
         request_control: RequestControl | None = None,
+        proxy_url: str = "",
     ) -> None:
         if (cookie_file is None) == (cookie_records is None):
             raise ProtocolError("cookie_file 与 cookie_records 必须且只能提供一个")
         self.options = options or SearchOptions()
         self.options.validate()
-        self.session = session or curl_requests.Session(impersonate="chrome")
+        self.session = session or curl_requests.Session(
+            impersonate="chrome", trust_env=False, proxies={"all": proxy_url},
+        )
         self.cookie_names = (
             load_cookies(self.session, cookie_file)
             if cookie_file is not None

@@ -29,7 +29,7 @@ class UnifiedQueueScheduler:
         self.database, self.settings = database, settings
         self.database.queue_capacity = settings.max_queued_tasks
         self.executor = task_executor or QueueTaskExecutor(database, cookie_store, settings)
-        self.execute_sku_sync = execute_sku_sync or self.executor.sku_sync
+        self.execute_sku_sync = execute_sku_sync
         self.guard = request_guard or RequestGuard(database, settings)
         self.poll_seconds = poll_seconds
         self.alert_callback = alert_callback

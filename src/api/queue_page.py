@@ -25,6 +25,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .card strong { display: block; font-size: 24px; margin-top: 5px; }
 .card small { color: #64748b; }
 .status { margin: 10px 0; color: #475569; }
+.account { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.account input { flex: 1; min-width: 240px; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; }
 th, td { text-align: left; padding: 10px 9px; border-bottom: 1px solid #eef2f7; white-space: nowrap; }
@@ -84,6 +86,49 @@ function renderTasks() {
     <details><summary>尝试结果</summary>${task.attempts.map(a => text(`${a.attempt}: ${a.account_id} / ${a.status} / ${a.error_message || '-'}`)).join('<br>')}</details></td><td>${task.dependency_id ? task.dependency_id.slice(0, 8) + '…' : '-'}</td>
     <td>${time(task.created_at)}</td><td>${time(task.started_at)}</td><td>${task.cancel_requested ? '是' : '否'}</td></tr>`).join('') : '<tr><td colspan="9" class="empty">暂无排队或执行中的任务</td></tr>';
 }
+const accountEditors = new Map();
+function renderAccounts(accounts) {
+  for (const account of accounts) {
+    let editor = accountEditors.get(account.account_id);
+    if (!editor) {
+      const row = document.createElement('div');
+      row.className = 'account';
+      const label = document.createElement('span');
+      const input = document.createElement('input');
+      input.placeholder = 'http:// 或 socks5://，留空直连';
+      input.setAttribute('aria-label', `${account.display_name} 代理地址`);
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      const button = document.createElement('button');
+      button.textContent = '保存代理';
+      const status = document.createElement('span');
+      editor = { row, label, input, button, status, dirty: false };
+      const current = editor;
+      input.oninput = () => { current.dirty = true; status.textContent = ''; };
+      button.onclick = async () => {
+        const value = input.value.trim();
+        button.disabled = true;
+        status.textContent = '';
+        try {
+          const response = await fetch(`/api/v1/accounts/${encodeURIComponent(account.account_id)}/proxy`, {
+            method: 'PUT', headers: { ...headers(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ proxy_url: value }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `保存失败（${response.status}）`);
+          if (input.value.trim() === value) { input.value = result.proxy_url; current.dirty = false; }
+          status.textContent = '已保存';
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+      };
+      row.append(label, input, button, status);
+      $('accounts').append(row);
+      accountEditors.set(account.account_id, editor);
+    }
+    editor.label.textContent = `${account.display_name}: ${account.state}${account.reason ? ' / ' + account.reason : ''}`;
+    if (!editor.dirty && !editor.button.disabled) editor.input.value = account.proxy_url || '';
+  }
+}
 async function refresh() {
   if (!$('apiKey').value.trim()) return;
   try {
@@ -92,7 +137,7 @@ async function refresh() {
     if (!summaryResponse.ok || !taskResponse.ok) throw new Error(`请求失败（${summaryResponse.status}/${taskResponse.status}）`);
     renderSummary(await summaryResponse.json());
     if (!accountsResponse.ok) throw new Error(`账号查询失败（${accountsResponse.status}）`);
-    $('accounts').textContent = (await accountsResponse.json()).accounts.map(a => `${a.display_name}: ${a.state}${a.reason ? ' / ' + a.reason : ''}`).join('　');
+    renderAccounts((await accountsResponse.json()).accounts);
     taskRows = (await taskResponse.json()).tasks;
     renderTasks(); showError('');
   } catch (error) { showError(error.message); }
