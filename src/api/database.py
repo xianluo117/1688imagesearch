@@ -9,7 +9,9 @@ from typing import Any, Literal
 import aiosqlite
 
 from .dingtalk import DingTalkConfig
+from .alert_store import AlertStoreMixin, initialize_alerts
 from .account_store import AccountStoreMixin, initialize_accounts
+from .account_deletion import AccountDeletionMixin, AccountDeletingError, migrate_account_deletion
 from .queue_schema import initialize_queue
 from .queue_store import QueueStoreMixin
 
@@ -52,7 +54,7 @@ class ProductTaskRecord:
     finished_at: float | None
 
 
-class Database(QueueStoreMixin, AccountStoreMixin):
+class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertStoreMixin):
     def __init__(self, path: str | Path, *, queue_capacity: int = 100) -> None:
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be positive")
@@ -89,8 +91,11 @@ class Database(QueueStoreMixin, AccountStoreMixin):
                     FOREIGN KEY(account_id) REFERENCES accounts(account_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY);
                 INSERT OR IGNORE INTO accounts(account_id, display_name, enabled, created_at, updated_at)
-                    VALUES ('default', '默认账号', 1, 0, 0);
+                    SELECT 'default', '默认账号', 1, 0, 0
+                    WHERE NOT EXISTS (SELECT 1 FROM schema_flags WHERE name='account_bootstrap');
+                INSERT OR IGNORE INTO schema_flags VALUES ('account_bootstrap');
 
                 DROP TABLE IF EXISTS search_tasks;
 
@@ -144,7 +149,6 @@ class Database(QueueStoreMixin, AccountStoreMixin):
                 columns = {row[1] for row in await cursor.fetchall()}
                 if "account_id" not in columns:
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'")
-                await db.execute(f"UPDATE {table} SET account_id='default' WHERE account_id IS NULL OR account_id=''")
             cursor = await db.execute("PRAGMA table_info(cookie_versions)")
             cookie_columns = {row[1] for row in await cursor.fetchall()}
             if "account_id" not in cookie_columns:
@@ -153,12 +157,12 @@ class Database(QueueStoreMixin, AccountStoreMixin):
             await db.execute("DROP INDEX IF EXISTS idx_cookie_active")
             await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cookie_active ON cookie_versions(account_id) WHERE is_active = 1")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cookie_account ON cookie_versions(account_id, uploaded_at DESC)")
-            await db.execute("INSERT OR IGNORE INTO accounts(account_id, display_name, enabled, created_at, updated_at, last_selected_at) VALUES ('default', '默认账号', 1, 0, 0, 0)")
             cursor = await db.execute("PRAGMA table_info(accounts)")
             account_columns = {row[1] for row in await cursor.fetchall()}
             if "last_selected_at" not in account_columns:
                 await db.execute("ALTER TABLE accounts ADD COLUMN last_selected_at REAL NOT NULL DEFAULT 0")
             await initialize_accounts(db)
+            await migrate_account_deletion(db)
             await db.commit()
             await db.executescript(
                 """
@@ -176,6 +180,9 @@ class Database(QueueStoreMixin, AccountStoreMixin):
             )
             db.row_factory = aiosqlite.Row
             await initialize_queue(db, now)
+            await initialize_alerts(db)
+            await db.commit()
+        await self.recover_account_deletions()
 
     async def get_dingtalk_config(self) -> DingTalkConfig | None:
         async with aiosqlite.connect(self.path) as db:
@@ -248,6 +255,10 @@ class Database(QueueStoreMixin, AccountStoreMixin):
         now = time.time()
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute("SELECT state FROM accounts WHERE account_id=?", (account_id,))
+            existing = await cursor.fetchone()
+            if existing and existing[0] == 'deleting':
+                raise AccountDeletingError("账号删除中，不能同步激活")
             await db.execute("INSERT OR IGNORE INTO accounts(account_id, display_name, enabled, created_at, updated_at, last_selected_at) VALUES (?, ?, 1, ?, ?, 0)", (account_id, account_id, now, now))
             await db.execute("UPDATE cookie_versions SET is_active=0 WHERE account_id=? AND is_active=1", (account_id,))
             cursor = await db.execute(
@@ -263,6 +274,7 @@ class Database(QueueStoreMixin, AccountStoreMixin):
                 await db.execute("UPDATE accounts SET display_name=?, updated_at=? WHERE account_id=?", (display_name, now, account_id))
             if confirmed_login:
                 await db.execute("UPDATE accounts SET state='normal', reason=NULL, until=NULL, updated_at=? WHERE account_id=?", (now, account_id))
+                await db.execute("UPDATE account_alert_cycles SET active=0 WHERE account_id=?", (account_id,))
             await db.commit()
             return version
 

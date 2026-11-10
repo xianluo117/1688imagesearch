@@ -64,11 +64,13 @@ def encode(value: object) -> str:
 
 async def initialize_queue(db: aiosqlite.Connection, now: float) -> None:
     await db.executescript(SCHEMA)
+    cursor = await db.execute("PRAGMA table_info(queue_attempts)")
+    if "error_details_json" not in {row[1] for row in await cursor.fetchall()}:
+        await db.execute("ALTER TABLE queue_attempts ADD COLUMN error_details_json TEXT")
     cursor = await db.execute("PRAGMA table_info(queue_tasks)")
     queue_columns = {row[1] for row in await cursor.fetchall()}
     if "account_id" not in queue_columns:
         await db.execute("ALTER TABLE queue_tasks ADD COLUMN account_id TEXT NOT NULL DEFAULT 'default'")
-    await db.execute("UPDATE queue_tasks SET account_id='default' WHERE account_id IS NULL OR account_id=''")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_queue_account_status ON queue_tasks(account_id, status, seq)")
     # Install before recovery so every legacy update is mirrored atomically.
     for table, kind in (("upload_tasks", "upload"), ("product_tasks", "product")):

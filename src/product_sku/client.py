@@ -9,6 +9,7 @@ from requests import RequestException
 from request_control import RequestControl, control_scope, disable_transport_retries, notify
 from image_search.cookies import ImportedCookie, load_cookie_records
 
+from error_details import response_details
 from .extraction import MAX_BYTES
 from .detail_images import enrich_detail_images
 from .html_encoding import decode_html
@@ -75,7 +76,27 @@ class ProductSkuClient:
         if self._closed:
             raise ValueError("client_closed")
 
+        def capture(reason):
+            notify(self.request_control, "capture_details", {
+                "stage": "sku_detail", "request_url": current,
+                "http": response_details(response, body=b''.join(chunks), complete=body_complete, reason=reason),
+            })
+
         def failure(status: str, reason: str) -> SkuResult:
+            nonlocal body_complete
+            if response is not None and not chunks and reason != "response_too_large":
+                size = 0
+                try:
+                    for chunk in response.iter_content(chunk_size=16384):
+                        chunks.append(chunk[:max(0, self.max_bytes - size)])
+                        size += len(chunk)
+                        if size > self.max_bytes:
+                            break
+                    else:
+                        body_complete = True
+                except (requests.RequestsError, RequestException) as exc:
+                    notify(self.request_control, "observe_error", exc)
+            capture(reason)
             return SkuResult(product_id, canonical, status, reason)
 
         current = canonical
@@ -83,6 +104,8 @@ class ProductSkuClient:
         retries = 0
         while True:
             response = None
+            chunks = []
+            body_complete = False
             retry = False
             notify(self.request_control, "before_request")
             try:
@@ -130,19 +153,25 @@ class ProductSkuClient:
                     for chunk in response.iter_content(chunk_size=16384):
                         size += len(chunk)
                         if size > self.max_bytes:
+                            chunks.append(chunk[:max(0, self.max_bytes - (size - len(chunk)))])
                             return failure("parse_failed", "response_too_large")
                         chunks.append(chunk)
+                    body_complete = True
                     body = b"".join(chunks)
                     try:
                         text = decode_html(body, response.headers.get("Content-Type", ""))
                     except ValueError as exc:
                         return failure("parse_failed", str(exc))
                     result = parse_detail(text, canonical)
+                    if result.status not in ("success", "partial_success") or not result.skus:
+                        capture(result.reason)
                     response.close()
                     response = None
                     return enrich_detail_images(self, text, result)
             except (requests.RequestsError, RequestException) as exc:
                 notify(self.request_control, "observe_error", exc)
+                if retries >= self.network_retries:
+                    return failure("network_failed", "network_retries_exhausted")
                 retry = True
             finally:
                 if response is not None:

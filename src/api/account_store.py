@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import time
 
+from .alert_store import account_exception
+
 
 async def initialize_accounts(db):
     cursor = await db.execute("PRAGMA table_info(accounts)")
@@ -29,7 +31,7 @@ class AccountStoreMixin:
     async def set_account_proxy(self, account_id, proxy_url):
         async with self._queue_connection() as db:
             cursor = await db.execute(
-                "UPDATE accounts SET proxy_url=?, updated_at=? WHERE account_id=?",
+                "UPDATE accounts SET proxy_url=?, updated_at=? WHERE account_id=? AND state<>'deleting'",
                 (proxy_url, time.time(), account_id),
             )
             await db.commit()
@@ -58,21 +60,23 @@ class AccountStoreMixin:
 
     async def get_account_state(self, account_id):
         async with self._queue_connection() as db:
-            cursor = await db.execute("SELECT account_id, display_name, enabled, state, reason, until, proxy_url FROM accounts WHERE account_id=?", (account_id,))
-            row = await cursor.fetchone()
-            if row is None:
+            rows = await db.execute_fetchall("SELECT account_id, display_name, enabled, state, reason, until, proxy_url FROM accounts WHERE account_id=?", (account_id,))
+            if not rows:
                 return None
-            state = dict(row)
+            state = dict(rows[0])
             if state["state"] == "cooldown" and state["until"] <= time.time():
                 state.update(state="normal", reason=None, until=None)
             return state
 
     async def pause_account(self, account_id, reason):
         async with self._queue_connection() as db:
-            await db.execute("UPDATE accounts SET state='paused', reason=?, until=NULL, updated_at=? WHERE account_id=?", (reason, time.time(), account_id))
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute("UPDATE accounts SET state='paused', reason=?, until=NULL, updated_at=? WHERE account_id=? AND state<>'deleting'", (reason, time.time(), account_id))
+            if cursor.rowcount:
+                await account_exception(db, account_id, reason)
             await db.commit()
 
     async def cooldown_account(self, account_id, reason, until):
         async with self._queue_connection() as db:
-            await db.execute("UPDATE accounts SET state='cooldown', reason=?, until=MAX(COALESCE(until,0),?), updated_at=? WHERE account_id=? AND state<>'paused'", (reason, until, time.time(), account_id))
+            await db.execute("UPDATE accounts SET state='cooldown', reason=?, until=MAX(COALESCE(until,0),?), updated_at=? WHERE account_id=? AND state NOT IN ('paused','deleting')", (reason, until, time.time(), account_id))
             await db.commit()

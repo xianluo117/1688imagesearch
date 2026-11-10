@@ -49,7 +49,7 @@ def classify_error(exc: Exception, *, task_kind: str) -> tuple[str, str]:
     ):
         if isinstance(exc, cls):
             return code, f"{task_kind}任务执行超时" if code == "TASK_TIMEOUT" else str(exc)
-    return "INTERNAL_ERROR", type(exc).__name__
+    return "INTERNAL_ERROR", f"{type(exc).__name__}: {exc}"
 
 
 class QueueTaskExecutor:
@@ -88,7 +88,7 @@ class QueueTaskExecutor:
             raise ProtocolError("关联上传任务结果不可用")
         _, records = await self.cookie_store.load_version(product.cookie_version)
         image_id, search_page_url = upload.image_id, upload.search_page_url
-        if task.payload.get("attempt", 1) == 2:
+        if task.payload.get("reupload_required") or task.account_id != upload.account_id:
             content = await download_image(
                 upload.image_url, max_bytes=self.settings.max_image_bytes,
                 connect_timeout=self.settings.download_connect_timeout,

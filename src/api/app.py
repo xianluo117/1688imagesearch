@@ -12,6 +12,7 @@ from .auth import require_api_key
 from .config import Settings
 from .cookie_store import CookieStore
 from .database import Database, ProductTaskRecord, UploadTaskRecord
+from .account_deletion import AccountDeletingError
 from .response_encoding import JsonCharsetMiddleware
 from .schemas import (
     CookieUploadResponse,
@@ -99,13 +100,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     database = Database(resolved.database_path)
     cookie_store = CookieStore(database, resolved.cookie_encryption_key)
     notifier = DingTalkNotifier(database)
-    scheduler = UnifiedQueueScheduler(database, cookie_store, resolved, alert_callback=notifier.alert_safe)
+    scheduler = UnifiedQueueScheduler(database, cookie_store, resolved)
     cleanup_service = TaskCleanupService(database, resolved)
     sku_service = ProductSkuService(cookie_store, resolved, scheduler)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await database.initialize()
+        await notifier.start()
         await scheduler.start()
         await cleanup_service.start()
         try:
@@ -113,6 +115,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await scheduler.stop()
             await cleanup_service.stop()
+            await notifier.stop()
 
     app = FastAPI(
         title="1688 Two-stage Image Search API",
@@ -129,6 +132,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sku_router)
     app.include_router(sku_v2_router)
     app.include_router(queue_router)
+
+    @app.exception_handler(AccountDeletingError)
+    async def account_deleting(_request: Request, exc: AccountDeletingError):
+        return JSONResponse(status_code=409, content={"detail": {
+            "code": "ACCOUNT_DELETING", "message": str(exc),
+        }})
 
     @app.exception_handler(IdempotencyConflict)
     async def idempotency_conflict(_request: Request, _exc: IdempotencyConflict):
@@ -194,9 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         require_api_key(x_api_key, resolved.search_api_key, scope="搜索")
         now = __import__("time").time()
-        alerts = await database.list_dingtalk_alerts()
-        for alert in alerts:
-            alert["next_allowed_at"] = alert["last_sent_at"] + notifier.dedupe_seconds
+        alerts = await database.list_alert_events()
         return {"configured": await notifier.get_config() is not None, "alerts": alerts, "now": now}
 
     @app.get("/api/v1/health", response_model=DetailedHealthResponse)

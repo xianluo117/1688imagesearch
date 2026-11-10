@@ -9,6 +9,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 from request_control import RequestControl, control_scope, disable_transport_retries, notify
+from error_details import exception_details, response_details
 
 import requests
 from curl_cffi import requests as curl_requests
@@ -244,7 +245,15 @@ class MtopClient:
                         method = "GET"
                     continue
                 response.raise_for_status()
-                return parse_json_or_jsonp(response)
+                payload = parse_json_or_jsonp(response)
+                ensure_mtop_success(payload)
+                return payload
+            except Exception as exc:
+                notify(self.request_control, "capture_details", {
+                    **exception_details(exc), "request_url": url,
+                    "http": response_details(response, body=response.text, complete=True),
+                })
+                raise
             finally:
                 close = getattr(response, "close", None)
                 if close is not None:

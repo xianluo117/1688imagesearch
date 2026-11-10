@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from image_search.image_input import detect_image_type
+from error_details import response_details
 
 
 class ImageDownloadError(RuntimeError):
@@ -82,6 +83,9 @@ async def download_image(
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         for redirect_count in range(max_redirects + 1):
             await validate_public_url(current_url)
+            response = None
+            body = bytearray()
+            body_complete = False
             try:
                 async with client.stream("GET", current_url, headers=headers) as response:
                     network_stream = response.extensions.get("network_stream")
@@ -102,6 +106,13 @@ async def download_image(
                         current_url = urljoin(current_url, location)
                         continue
                     if response.status_code != 200:
+                        async for chunk in response.aiter_bytes():
+                            remaining = max_bytes - len(body)
+                            body.extend(chunk[:remaining])
+                            if len(chunk) > remaining:
+                                break
+                        else:
+                            body_complete = True
                         raise ImageDownloadError(f"图片下载返回 HTTP {response.status_code}")
 
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
@@ -121,14 +132,20 @@ async def download_image(
                         body.extend(chunk)
                         if len(body) > max_bytes:
                             raise ImageDownloadError("远程图片超过体积限制")
+                    body_complete = True
                     content = bytes(body)
                     if not content:
                         raise ImageDownloadError("远程图片内容为空")
                     if detect_image_type(content) is None:
                         raise ImageDownloadError("远程内容不是支持的 JPEG、PNG、GIF 或 WebP 图片")
                     return content
-            except httpx.TimeoutException as exc:
-                raise ImageDownloadError("图片下载超时") from exc
-            except httpx.HTTPError as exc:
-                raise ImageDownloadError(f"图片下载网络错误: {type(exc).__name__}") from exc
+            except (ImageDownloadError, httpx.HTTPError) as exc:
+                details = response_details(response, body=bytes(body[:max_bytes]), complete=body_complete)
+                details["request_url"] = current_url
+                if isinstance(exc, ImageDownloadError):
+                    exc.http_details = details
+                    raise
+                error = ImageDownloadError(f"图片下载网络错误: {type(exc).__name__}: {exc}")
+                error.http_details = details
+                raise error from exc
     raise ImageDownloadError("图片下载失败")

@@ -1,6 +1,8 @@
 """DingTalk custom robot configuration, signing and alert deduplication."""
 from __future__ import annotations
 
+import asyncio
+import traceback
 import base64
 import hashlib
 import hmac
@@ -30,6 +32,33 @@ class DingTalkNotifier:
     def __init__(self, database, *, dedupe_seconds: float = 3600.0) -> None:
         self.database = database
         self.dedupe_seconds = dedupe_seconds
+        self._worker = None
+        self._stopping = False
+
+    async def start(self):
+        self._stopping = False
+        self._worker = asyncio.create_task(self._send_events(), name="dingtalk-events")
+
+    async def stop(self):
+        self._stopping = True
+        if self._worker is not None:
+            await self._worker
+
+    async def _send_events(self):
+        while not self._stopping:
+            event = await self.database.claim_alert_event()
+            if event is None:
+                await asyncio.sleep(0.1)
+                continue
+            error = None
+            try:
+                await self.send_text(
+                    f"1688 告警\n原因：{event['reason']}\n任务类型：{event['task_kind']}"
+                    f"\n任务 ID：{event['task_id']}\n详情：{event['message']}"
+                )
+            except Exception as exc:
+                error = ''.join(traceback.format_exception(exc))
+            await self.database.finish_alert_event(event['id'], error)
 
     @staticmethod
     def sign(secret: str, timestamp: int) -> str:

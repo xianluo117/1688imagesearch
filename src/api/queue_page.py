@@ -56,6 +56,7 @@ tr:last-child td { border-bottom: 0; }
 <thead><tr><th><input id="selectAll" type="checkbox"></th><th>序号</th><th>类型</th><th>状态</th><th>任务 ID</th><th>依赖任务</th><th>创建时间</th><th>开始时间</th><th>取消请求</th></tr></thead>
 <tbody id="tasks"><tr><td colspan="9" class="empty">请输入 API Key 后加载</td></tr></tbody>
 </table></div>
+<dialog id="errorDialog" style="max-width:90vw"><button id="closeDetails">关闭</button> <button id="copyDetails">复制</button><pre id="errorDetails" style="white-space:pre-wrap;overflow-wrap:anywhere;max-width:85vw"></pre></dialog>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -81,13 +82,17 @@ function renderTasks() {
   $('cancel').disabled = !rows.length;
   $('tasks').innerHTML = rows.length ? rows.map(task => `<tr>
     <td><input class="task-check" type="checkbox" value="${task.task_id}"></td><td>${task.seq}</td><td>${task.kind}</td>
-    <td><span class="badge ${task.status}">${labels[task.status] || task.status}</span></td>
+    <td><span class="badge ${task.status}">${task.status === 'queued' && !task.account_id ? '等待账号' : labels[task.status] || task.status}</span><br>${text([task.error_code, task.error_message].filter(Boolean).join(': '))}<br><button class="error-detail" data-id="${task.task_id}">错误详情</button></td>
     <td title="${task.task_id}">${task.task_id.slice(0, 8)}…<br>${text(task.account_id)} · 第 ${task.attempt_count} 次
     <details><summary>尝试结果</summary>${task.attempts.map(a => text(`${a.attempt}: ${a.account_id} / ${a.status} / ${a.error_message || '-'}`)).join('<br>')}</details></td><td>${task.dependency_id ? task.dependency_id.slice(0, 8) + '…' : '-'}</td>
     <td>${time(task.created_at)}</td><td>${time(task.started_at)}</td><td>${task.cancel_requested ? '是' : '否'}</td></tr>`).join('') : '<tr><td colspan="9" class="empty">暂无排队或执行中的任务</td></tr>';
 }
 const accountEditors = new Map();
 function renderAccounts(accounts) {
+  const ids = new Set(accounts.map(a => a.account_id));
+  for (const [id, editor] of accountEditors) {
+    if (!ids.has(id)) { editor.row.remove(); accountEditors.delete(id); }
+  }
   for (const account of accounts) {
     let editor = accountEditors.get(account.account_id);
     if (!editor) {
@@ -102,7 +107,18 @@ function renderAccounts(accounts) {
       const button = document.createElement('button');
       button.textContent = '保存代理';
       const status = document.createElement('span');
-      editor = { row, label, input, button, status, dirty: false };
+      const remove = document.createElement('button');
+      remove.className = 'danger';
+      remove.textContent = '删除';
+      remove.onclick = async () => {
+        remove.disabled = true;
+        try {
+          const response = await fetch(`/api/v1/accounts/${encodeURIComponent(account.account_id)}`, { method: 'DELETE', headers: headers() });
+          if (!response.ok) throw new Error(`删除失败（${response.status}）`);
+          await refresh();
+        } catch (error) { showError(error.message); remove.disabled = false; }
+      };
+      editor = { row, label, input, button, remove, status, dirty: false };
       const current = editor;
       input.oninput = () => { current.dirty = true; status.textContent = ''; };
       button.onclick = async () => {
@@ -121,11 +137,15 @@ function renderAccounts(accounts) {
         } catch (error) { status.textContent = error.message; }
         finally { button.disabled = false; }
       };
-      row.append(label, input, button, status);
+      row.append(label, input, button, remove, status);
       $('accounts').append(row);
       accountEditors.set(account.account_id, editor);
     }
-    editor.label.textContent = `${account.display_name}: ${account.state}${account.reason ? ' / ' + account.reason : ''}`;
+    editor.label.textContent = `${account.display_name}: ${account.state === 'deleting' ? '删除中' : account.state}${account.reason ? ' / ' + account.reason : ''}`;
+    editor.remove.disabled = account.state === 'deleting';
+    editor.remove.textContent = account.state === 'deleting' ? '删除中' : '删除';
+    editor.input.disabled = account.state === 'deleting';
+    if (account.state === 'deleting') editor.button.disabled = true;
     if (!editor.dirty && !editor.button.disabled) editor.input.value = account.proxy_url || '';
   }
 }
@@ -154,6 +174,21 @@ $('cancel').onclick = async () => {
     if (!response.ok) throw new Error(`取消失败（${response.status}）`);
     await refresh();
   } catch (error) { showError(error.message); }
+};
+$('tasks').onclick = async event => {
+  const button = event.target.closest('.error-detail');
+  if (!button) return;
+  try {
+    const response = await fetch(`/api/v1/queue/tasks/${encodeURIComponent(button.dataset.id)}/details`, { headers: headers() });
+    if (!response.ok) throw new Error(`详情查询失败（${response.status}）`);
+    $('errorDetails').textContent = JSON.stringify(await response.json(), null, 2);
+    $('errorDialog').showModal();
+  } catch (error) { showError(error.message); }
+};
+$('closeDetails').onclick = () => $('errorDialog').close();
+$('copyDetails').onclick = async () => {
+  try { await navigator.clipboard.writeText($('errorDetails').textContent); }
+  catch (error) { showError(error.message); }
 };
 setInterval(refresh, 5000);
 if ($('apiKey').value) refresh();

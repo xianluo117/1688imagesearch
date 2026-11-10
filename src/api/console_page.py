@@ -24,7 +24,7 @@ textarea { min-height: 90px; resize: vertical; } button { width: auto; cursor: p
 <button id="save">保存配置</button> <button id="test" class="secondary">测试发送</button>
 <label>测试消息</label><textarea id="text">1688 告警机器人测试消息</textarea>
 </section>
-<section><h2>告警状态</h2><div id="status">加载中...</div><table><thead><tr><th>原因</th><th>最近发送时间</th><th>下次允许发送</th></tr></thead><tbody id="alerts"></tbody></table></section>
+<section><h2>告警状态</h2><div id="status">加载中...</div><table><thead><tr><th>原因</th><th>发送时间</th><th>状态 / 失败原因</th></tr></thead><tbody id="alerts"></tbody></table></section>
 <div id="message"></div>
 <script>
 const $ = id => document.getElementById(id); $('apiKey').value = sessionStorage.getItem('console-api-key') || sessionStorage.getItem('queue-api-key') || '';
@@ -51,7 +51,15 @@ async function load() {
   if (!key()) { $('status').textContent = '请先输入 SEARCH_API_KEY'; return; }
   const p = await request('/api/v1/console/alerts');
   $('status').textContent = p.configured ? '钉钉机器人已配置' : '尚未配置钉钉机器人';
-  $('alerts').innerHTML = p.alerts.length ? p.alerts.map(a => `<tr><td>${a.reason}</td><td>${time(a.last_sent_at)}</td><td>${time(a.next_allowed_at)}</td></tr>`).join('') : '<tr><td colspan="3">暂无自动告警记录</td></tr>';
+  $('alerts').replaceChildren();
+  for (const a of p.alerts) {
+    const row = document.createElement('tr');
+    for (const value of [a.reason, time(a.sent_at), `${a.status}${a.error_details ? '\n' + a.error_details : ''}`]) {
+      const cell = document.createElement('td'); cell.textContent = value;
+      cell.style.whiteSpace = 'pre-wrap'; row.append(cell);
+    }
+    $('alerts').append(row);
+  }
 }
 $('saveKey').onclick = async () => {
   try {

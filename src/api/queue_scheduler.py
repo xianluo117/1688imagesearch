@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
 from image_search.errors import TaskCancelledError
+from error_details import exception_details, response_details
 
 from .queue_store import TERMINAL
 from .request_guard import ExecutionBudget, RequestGuard, SchedulerStoppingError
@@ -137,13 +138,16 @@ class UnifiedQueueScheduler:
             await watcher
         # The operation has ended. A late success never overrides a latched timeout.
         failure = budget.failure or failure
+        details = {"stage": task.kind, "events": getattr(control, "diagnostics", [])}
         if failure is not None:
+            details["exception"] = exception_details(failure)
+            details["http"] = response_details(getattr(failure, "response", None))
             code, message = classify_error(failure, task_kind=task.kind)
             if isinstance(failure, SchedulerStoppingError):
                 code, message = "SCHEDULER_STOPPING", str(failure)
             await self.database.finish_queue_task(
                 task.task_id, status="cancelled" if isinstance(failure, TaskCancelledError) else "failed",
-                error_code=code, error_message=message,
+                error_code=code, error_message=message, error_details=details,
             )
             if self.alert_callback is not None and code in {
                 "RISK_CONTROL", "LOGIN_REQUIRED", "COOKIE_INVALID", "MTOP_TOKEN_INVALID",
@@ -155,10 +159,9 @@ class UnifiedQueueScheduler:
                     ),
                     name=f"dingtalk-alert-{task.task_id}",
                 )
-        elif task.kind == "sku":
-            await self.database.complete_sku_task(task.task_id, result)
         else:
-            await self.database.finish_queue_task(task.task_id, status="succeeded", result=result)
+            await self.database.finish_queue_task(task.task_id, status="succeeded", result=result,
+                                                  error_details=details)
 
     async def wait_for_task(self, task_id: str, *, timeout: float | None = None):
         """Return the raw QueueTaskRecord. TimeoutError affects only this waiter."""

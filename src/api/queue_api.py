@@ -57,7 +57,8 @@ async def queue_task_summary(task_id: str, database) -> dict | None:
         "task_id": task.task_id,
         "account_id": task.account_id,
         "attempt_count": task.payload.get("attempt", 1),
-        "attempts": await database.list_task_attempts(task.task_id),
+        "attempts": [{key: value for key, value in attempt.items() if key != "result"}
+                     for attempt in await database.list_task_attempts(task.task_id)],
         "kind": task.kind,
         "status": task.status,
         "dependency_id": task.dependency_id,
@@ -99,6 +100,14 @@ async def list_accounts(request: Request):
     database = request.app.state.database
     accounts = await database.list_accounts()
     return {"accounts": [{**account, **await database.get_account_state(account["account_id"])} for account in accounts]}
+
+
+@router.delete("/api/v1/accounts/{account_id}")
+async def delete_account(account_id: str, request: Request):
+    result = await request.app.state.database.delete_account(account_id)
+    if result is None:
+        raise HTTPException(404, detail="账号不存在")
+    return result
 
 
 class AccountProxyRequest(BaseModel):
@@ -159,6 +168,18 @@ async def queue_tasks(
     database = request.app.state.database
     tasks = await database.list_queue_tasks(statuses)
     return {"tasks": [await queue_task_summary(task["task_id"], database) for task in tasks]}
+
+
+@router.get("/api/v1/queue/tasks/{task_id}/details")
+async def task_error_details(task_id: str, request: Request):
+    database = request.app.state.database
+    task = await database.get_queue_task(task_id)
+    if task is None:
+        raise HTTPException(404, detail="任务不存在")
+    attempts = await database.list_task_attempts(task_id, details=True)
+    return {"task_id": task_id, "error_code": task.error_code, "error_message": task.error_message,
+            "result": task.result, "attempts": attempts,
+            "note": None if attempts else "历史任务未记录原始错误"}
 
 
 @router.post("/api/v1/queue/cancel")

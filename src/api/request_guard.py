@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from image_search.errors import TaskCancelledError
+from error_details import exception_details, response_details
 
 from .protection_signals import error_signal, response_signal, result_signal, retry_after_seconds
 
@@ -101,7 +102,7 @@ class RequestGuard:
                 await self.checkpoint(task_id, budget)
                 async with self._lock:
                     account = await self.database.get_account_state(account_id)
-                    if account is None or not account["enabled"] or account["state"] != "normal":
+                    if account is None or not account["enabled"] or account["state"] not in ("normal", "deleting"):
                         raise AccountUnavailableError(f"账号 {account_id} 不可用")
                     state = await self.database.get_scheduler_state(now=self.wall_clock())
                     # Admission must recheck after SQLite awaits (including shutdown).
@@ -166,6 +167,10 @@ class BoundRequestControl:
     def __init__(self, guard, task_id, budget, account_id, loop):
         self.guard, self.task_id, self.budget, self.account_id, self.loop = guard, task_id, budget, account_id, loop
         self._response = None
+        self.diagnostics = []
+
+    def capture_details(self, details):
+        self.diagnostics.append(details)
 
     def _call(self, method, *args):
         try:
@@ -187,6 +192,7 @@ class BoundRequestControl:
         self._call(self.guard.observe_response, response, self.account_id)
 
     def observe_error(self, exc: Exception) -> None:
+        self.capture_details({**exception_details(exc), "http": response_details(self._response)})
         self._call(self.guard.observe_error, exc, self._response, self.account_id)
 
     def observe_result(self, result) -> None:

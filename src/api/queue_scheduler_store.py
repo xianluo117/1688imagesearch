@@ -26,9 +26,12 @@ class SchedulerStoreMixin:
     async def get_scheduler_state(self, *, now: float | None = None) -> SchedulerState:
         now = time.time() if now is None else now
         async with self._queue_connection() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            state = await self._scheduler_in_transaction(db, now)
-            await db.commit()
+            rows = await db.execute_fetchall("SELECT state,reason,until,updated_at FROM queue_scheduler WHERE singleton=1")
+            state = SchedulerState(*rows[0])
+            if state.state == "cooldown" and state.until <= now:
+                await db.execute("BEGIN IMMEDIATE")
+                state = await self._scheduler_in_transaction(db, now)
+                await db.commit()
             return state
 
     async def set_cooldown(self, reason: str, *, until: float) -> SchedulerState:

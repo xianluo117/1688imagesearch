@@ -7,7 +7,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
 
-from image_search.errors import AuthenticationError, RateLimitError, RiskControlError
+from image_search.errors import AuthenticationError, RateLimitError, RiskControlError, TokenError
 
 
 PAUSE_MARKERS = (
@@ -86,6 +86,8 @@ def result_signal(value) -> tuple[str, str] | None:
 def error_signal(exc: Exception) -> tuple[str, str] | None:
     # Pause always wins even if an upstream error includes both kinds of marker.
     signal = result_signal({"reason": str(exc), "ret": getattr(exc, "ret", "")})
+    if isinstance(exc, TokenError):
+        return "paused", "MTOP_TOKEN_INVALID"
     if isinstance(exc, (AuthenticationError, RiskControlError)) or (signal and signal[0] == "paused"):
         return "paused", "LOGIN_REQUIRED" if isinstance(exc, AuthenticationError) else (signal[1] if signal else "RISK_CONTROL")
     response = getattr(exc, "response", None)

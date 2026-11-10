@@ -16,6 +16,7 @@ from typing import Any, Literal
 import aiosqlite
 
 from .queue_schema import encode
+from .alert_store import record_completion
 from .queue_scheduler_store import SchedulerStoreMixin
 
 TaskKind = Literal["upload", "product", "sku"]
@@ -63,6 +64,22 @@ class QueueStoreMixin(SchedulerStoreMixin):
     accepting: bool = True
     queue_capacity: int = 100
 
+    async def _queue_read(self, sql, parameters=()):
+        # Keep a short read in one worker call instead of crossing threads for
+        # connect/pragma/execute/fetch/close on every cancellation poll.
+        import asyncio
+        import sqlite3
+
+        def read():
+            db = sqlite3.connect(self.path, timeout=30)
+            db.row_factory = sqlite3.Row
+            try:
+                return db.execute(sql, parameters).fetchall()
+            finally:
+                db.close()
+
+        return await asyncio.to_thread(read)
+
     @asynccontextmanager
     async def _queue_connection(self):
         async with aiosqlite.connect(self.path, timeout=30) as db:
@@ -98,10 +115,18 @@ class QueueStoreMixin(SchedulerStoreMixin):
                     return None, "UPLOAD_TASK_NOT_FOUND"
                 if upload["status"] in ("cancelled", "failed"):
                     return None, "UPLOAD_TASK_" + upload["status"].upper()
-                if upload["status"] != "succeeded" or not upload["image_id"] or upload["cookie_version"] is None:
+                if upload["status"] != "succeeded" or not upload["image_id"]:
                     return None, "UPLOAD_TASK_NOT_READY"
-                account_id = upload["account_id"]
-                cookie_version = upload["cookie_version"]
+                selected = await self._select_account_in_transaction(db, account_id or upload["account_id"])
+                if selected is None and account_id is None:
+                    selected = await self._select_account_in_transaction(db)
+                if selected is None:
+                    return None, "ACCOUNT_UNAVAILABLE"
+                account_id, cookie_version = selected
+                if account_id != upload["account_id"] or upload["cookie_version"] is None:
+                    payload = {**payload, "reupload_required": True}
+                else:
+                    cookie_version = upload["cookie_version"]
             c = await db.execute("SELECT COUNT(*) FROM queue_tasks WHERE status IN ('queued','running')")
             if (await c.fetchone())[0] >= limit:
                 return None, "QUEUE_FULL"
@@ -145,10 +170,8 @@ class QueueStoreMixin(SchedulerStoreMixin):
         return task_id
 
     async def get_queue_task(self, task_id: str) -> QueueTaskRecord | None:
-        async with self._queue_connection() as db:
-            c = await db.execute("SELECT * FROM queue_tasks WHERE task_id=?", (task_id,))
-            row = await c.fetchone()
-            return record(row) if row is not None else None
+        rows = await self._queue_read("SELECT * FROM queue_tasks WHERE task_id=?", (task_id,))
+        return record(rows[0]) if rows else None
 
     async def claim_next_task(self, *, max_running: int = 1, max_account_running: int | None = None) -> QueueTaskRecord | None:
         """Atomically claim the first ready task under global and per-account limits."""
@@ -165,6 +188,8 @@ class QueueStoreMixin(SchedulerStoreMixin):
             if not self.accepting:
                 return None
             now = time.time()
+            await self._reassign_waiting(db)
+            await self._finalize_deletions(db)
             state = await self._scheduler_in_transaction(db, now)
             if state.state != "normal":
                 await db.commit()
@@ -241,8 +266,9 @@ class QueueStoreMixin(SchedulerStoreMixin):
             return cancelled
 
     async def is_queue_cancel_requested(self, task_id: str) -> bool:
-        task = await self.get_queue_task(task_id)
-        return task is None or task.cancel_requested or task.status == "cancelled"
+        rows = await self._queue_read(
+            "SELECT cancel_requested, status FROM queue_tasks WHERE task_id=?", (task_id,))
+        return not rows or bool(rows[0][0]) or rows[0][1] == "cancelled"
 
     async def complete_sku_task(self, task_id: str, result: dict[str, Any]) -> TaskStatus | None:
         """Pass SkuResult.to_dict(), NOT an HTTP v1/v2 presentation payload."""
@@ -256,7 +282,7 @@ class QueueStoreMixin(SchedulerStoreMixin):
     async def finish_queue_task(
         self, task_id: str, *, status: Literal["succeeded", "failed", "cancelled"],
         result: dict[str, Any] | None = None, error_code: str | None = None,
-        error_message: str | None = None,
+        error_message: str | None = None, error_details: dict | None = None,
     ) -> TaskStatus | None:
         """Acknowledge actual operation end, not waiter cancellation or timeout.
 
@@ -281,20 +307,27 @@ class QueueStoreMixin(SchedulerStoreMixin):
                 error_message = None if success else str(result.get("reason", ""))
             elif row["kind"] == "sku" and status == "succeeded":
                 raise ValueError("SKU success requires an original business result")
+            if status == "failed" and error_details:
+                errors = [event for event in error_details.get("events", []) if event.get("exception_type")]
+                if errors:
+                    error_message = f"{errors[-1]['exception_type']}: {errors[-1].get('message', '')}"
             now = time.time()
             payload = json.loads(row["payload_json"])
             attempt = payload.get("attempt", 1)
             await db.execute("""
                 INSERT OR REPLACE INTO queue_attempts
-                    (task_id,attempt,account_id,cookie_version,status,error_code,error_message,result_json)
-                VALUES (?,?,?,?,?,?,?,?)
+                    (task_id,attempt,account_id,cookie_version,status,error_code,error_message,result_json,error_details_json)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (task_id, attempt, row["account_id"], payload.get("cookie_version"), status,
-                  error_code, error_message, encode(result) if result is not None else None))
+                  error_code, error_message, encode(result) if result is not None else None,
+                  encode(error_details) if error_details is not None else None))
             if status == "failed" and attempt == 1 and self.accepting and error_code != "SCHEDULER_STOPPING":
                 selected = await self._select_account_in_transaction(db, exclude=row["account_id"])
                 if selected is not None:
                     account_id, version = selected
                     payload.update(attempt=2, cookie_version=version)
+                    if row["kind"] == "product":
+                        payload["reupload_required"] = True
                     await db.execute("""
                         UPDATE queue_tasks SET status='queued', account_id=?, payload_json=?,
                             result_json=NULL, error_code=NULL, error_message=NULL,
@@ -307,6 +340,7 @@ class QueueStoreMixin(SchedulerStoreMixin):
                                 error_code=NULL, error_message=NULL, started_at=NULL,
                                 finished_at=NULL, updated_at=? WHERE task_id=?
                         """, (account_id, version, now, task_id))
+                    await self._finalize_deletions(db)
                     await db.commit()
                     return "queued"
             values = (status, error_code, error_message, now, now, task_id)
@@ -329,17 +363,23 @@ class QueueStoreMixin(SchedulerStoreMixin):
                     UPDATE {table} SET status=?, error_code=?, error_message=?, finished_at=?, updated_at=?
                     WHERE task_id=?
                 """, values)
+            await record_completion(db, row, status, error_message)
+            await self._finalize_deletions(db)
             await db.commit()
             return status
 
-    async def list_task_attempts(self, task_id: str) -> list[dict[str, Any]]:
+    async def list_task_attempts(self, task_id: str, *, details: bool = False) -> list[dict[str, Any]]:
         async with self._queue_connection() as db:
             c = await db.execute("SELECT * FROM queue_attempts WHERE task_id=? ORDER BY attempt", (task_id,))
             attempts = []
             for row in await c.fetchall():
                 item = dict(row)
                 raw = item.pop("result_json")
+                diagnostic = item.pop("error_details_json")
                 item["result"] = json.loads(raw) if raw else None
+                if details:
+                    item["error_details"] = json.loads(diagnostic) if diagnostic else None
+                    item["details_note"] = None if diagnostic else "历史任务未记录原始错误"
                 attempts.append(item)
             return attempts
 
