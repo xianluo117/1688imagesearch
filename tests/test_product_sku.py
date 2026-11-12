@@ -95,6 +95,29 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parse_detail(page(business(), "请登录 验证码"), URL).ok)
         self.assertEqual(parse_detail('<form action="https://login.1688.com/member/signin"></form>', URL).status, "login_required")
 
+    def test_inline_gateway_captcha_is_access_restricted(self):
+        config = {"action": "captcha", "url": URL + "/_____tmd_____/punish?x5secdata=synthetic&x5step=1"}
+        for prefix in ("", 'sessionStorage.x5referer = window.location.href;var url = "synthetic";window.location.replace(url);'):
+            with self.subTest(prefix=prefix):
+                html = '<script>' + prefix + 'window._config_ = ' + json.dumps(config) + ';</script><!--rgv587_flag:sm-->'
+                result = parse_detail(html, URL)
+                self.assertEqual(result.status, "access_restricted")
+                self.assertEqual(result.reason, "captcha_required")
+                self.assertEqual(result.to_dict()["sku_count"], 0)
+
+    def test_captcha_keywords_and_unconfirmed_configs_do_not_block(self):
+        configs = [
+            {"action": "captcha", "url": URL},
+            {"action": "normal", "url": URL + "/_____tmd_____/punish"},
+            {"action": "captcha", "url": None},
+        ]
+        for config in configs:
+            with self.subTest(config=config):
+                html = '<script>window._config_ = ' + json.dumps(config) + ';</script>'
+                self.assertTrue(parse_detail(page(business(), html), URL).ok)
+        self.assertTrue(parse_detail(page(dict(business(), title="captcha x5sec 验证码")), URL).ok)
+        self.assertTrue(parse_detail(page(business(), '<script>window._config_ = {broken};</script>'), URL).ok)
+
     def test_main_image_is_bound_to_current_product(self):
         meta = '<meta property="og:url" content="{}"><meta property="og:image" content="https://img.example/a.jpg?x=1&y=2">'
         self.assertEqual(parse_detail(page(business(), meta.format(URL)), URL).main_image,

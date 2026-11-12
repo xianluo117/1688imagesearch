@@ -34,6 +34,12 @@ th { background: #f8fafc; font-weight: 600; }
 tr:last-child td { border-bottom: 0; }
 .badge { display: inline-block; padding: 3px 7px; border-radius: 999px; background: #e2e8f0; }
 .badge.queued { background: #fef3c7; }.badge.running { background: #dbeafe; }
+.badge.succeeded { background: #dcfce7; color: #166534; }
+.badge.failed { background: #fee2e2; color: #991b1b; }
+.task-error { color: #b91c1c; max-width: 320px; white-space: normal; margin-top: 6px; }
+.task-note { color: #64748b; font-size: 12px; margin-top: 6px; }
+.task-detail { margin-top: 8px; }
+.attempts { margin-top: 6px; color: #475569; }
 .empty { text-align: center; color: #64748b; padding: 28px; }
 @media (max-width: 700px) { input[type="password"] { min-width: 180px; flex: 1; } th, td { padding: 8px 6px; } }
 </style>
@@ -75,6 +81,28 @@ function renderSummary(snapshot) {
   const s = snapshot.scheduler;
   $('scheduler').textContent = `调度器：${s.state}${s.reason ? `（${s.reason}）` : ''}　接收新任务：${snapshot.accepting ? '是' : '否'}${s.cooldown_remaining ? `　冷却剩余：${Math.ceil(s.cooldown_remaining)} 秒` : ''}`;
 }
+function renderTaskStatus(task) {
+  const historicalFailure = (task.attempts || []).some(a => a.status === 'failed');
+  const succeeded = task.status === 'succeeded';
+  const error = task.error_code === 'access_restricted' && task.error_message === 'captcha_required'
+    ? '触发安全验证，需要完成验证码验证；未获取到商品数据'
+    : [task.error_code, task.error_message].filter(Boolean).join(': ');
+  const currentError = !succeeded && (task.status === 'failed' || Boolean(error));
+  const label = succeeded && historicalFailure ? '重试后成功' :
+    task.status === 'queued' && !task.account_id ? '等待账号' : labels[task.status] || task.status;
+  const detailLabel = currentError ? '错误详情' : historicalFailure ? '历史失败详情' : '';
+  return `<span class="badge ${text(task.status)}">${text(label)}</span>` +
+    (currentError && error ? `<div class="task-error">${text(error)}</div>` : '') +
+    (succeeded && historicalFailure ? '<div class="task-note">最终结果成功，历史失败不影响本次结果</div>' : '') +
+    (detailLabel ? `<div class="task-detail"><button class="error-detail secondary" data-id="${text(task.task_id)}">${detailLabel}</button></div>` : '');
+}
+function renderAttempts(task) {
+  const attempts = task.attempts || [];
+  if (!attempts.length) return '';
+  return `<details class="attempts"><summary>执行记录（${attempts.length} 次）</summary>${attempts.map(a =>
+    text(`第 ${a.attempt} 次：${a.account_id || '-'} / ${labels[a.status] || a.status} / ${a.error_message || a.error_code || '-'}`)
+  ).join('<br>')}</details>`;
+}
 function renderTasks() {
   const kind = $('kindFilter').value;
   const rows = taskRows.filter(task => !kind || task.kind === kind);
@@ -82,9 +110,9 @@ function renderTasks() {
   $('cancel').disabled = !rows.length;
   $('tasks').innerHTML = rows.length ? rows.map(task => `<tr>
     <td><input class="task-check" type="checkbox" value="${task.task_id}"></td><td>${task.seq}</td><td>${task.kind}</td>
-    <td><span class="badge ${task.status}">${task.status === 'queued' && !task.account_id ? '等待账号' : labels[task.status] || task.status}</span><br>${text([task.error_code, task.error_message].filter(Boolean).join(': '))}<br><button class="error-detail" data-id="${task.task_id}">错误详情</button></td>
+    <td>${renderTaskStatus(task)}</td>
     <td title="${task.task_id}">${task.task_id.slice(0, 8)}…<br>${text(task.account_id)} · 第 ${task.attempt_count} 次
-    <details><summary>尝试结果</summary>${task.attempts.map(a => text(`${a.attempt}: ${a.account_id} / ${a.status} / ${a.error_message || '-'}`)).join('<br>')}</details></td><td>${task.dependency_id ? task.dependency_id.slice(0, 8) + '…' : '-'}</td>
+    ${renderAttempts(task)}</td><td>${task.dependency_id ? task.dependency_id.slice(0, 8) + '…' : '-'}</td>
     <td>${time(task.created_at)}</td><td>${time(task.started_at)}</td><td>${task.cancel_requested ? '是' : '否'}</td></tr>`).join('') : '<tr><td colspan="9" class="empty">暂无排队或执行中的任务</td></tr>';
 }
 const accountEditors = new Map();

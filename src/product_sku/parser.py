@@ -309,7 +309,7 @@ def parse_detail(text: str, url: str) -> SkuResult:
         page = Page(text)
         if page.blocked:
             result.status = page.blocked
-            result.reason = "explicit_access_page"
+            result.reason = page.blocked_reason or "explicit_access_page"
             return result
         roots, malformed_json = json_roots(page)
         models: list[Any] = []

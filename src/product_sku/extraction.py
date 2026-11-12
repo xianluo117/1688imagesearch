@@ -31,6 +31,7 @@ class Page(HTMLParser):
         self.scripts: list[str] = []
         self.meta: dict[str, set[str]] = {}
         self.blocked: str | None = None
+        self.blocked_reason: str | None = None
         self._script: list[str] | None = None
         self.feed(text)
         self.close()
@@ -55,7 +56,21 @@ class Page(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "script" and self._script is not None:
-            self.scripts.append("".join(self._script))
+            script = "".join(self._script)
+            self.scripts.append(script)
+            # Inspect a structured gateway configuration, never execute JavaScript
+            # or classify ordinary product text containing captcha keywords.
+            for match in re.finditer(r'(?:^|;)\s*window\._config_\s*=\s*', script):
+                try:
+                    config, _ = json.JSONDecoder(object_pairs_hook=unique_object).raw_decode(script, match.end())
+                except (ValueError, RecursionError):
+                    continue
+                if (isinstance(config, dict) and config.get("action") == "captcha"
+                        and isinstance(config.get("url"), str)
+                        and address_status(config["url"]) == "access_restricted"):
+                    self.blocked = "access_restricted"
+                    self.blocked_reason = "captcha_required"
+                    break
             self._script = None
 
     def main_image(self, product_id: str) -> str | None:
