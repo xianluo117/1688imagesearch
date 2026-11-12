@@ -311,6 +311,9 @@ def parse_detail(text: str, url: str) -> SkuResult:
             result.status = page.blocked
             result.reason = page.blocked_reason or "explicit_access_page"
             return result
+        if page.offline:
+            result.status, result.reason = "source_not_applicable", "product_offline"
+            return result
         roots, malformed_json = json_roots(page)
         models: list[Any] = []
         sellers: list[dict] = []

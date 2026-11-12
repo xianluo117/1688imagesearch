@@ -79,7 +79,8 @@ class ProductSkuClient:
         def capture(reason):
             notify(self.request_control, "capture_details", {
                 "stage": "sku_detail", "request_url": current,
-                "http": response_details(response, body=b''.join(chunks), complete=body_complete, reason=reason),
+                "http": response_details(response, body=decoded_text if decoded_text is not None else b''.join(chunks),
+                                         complete=body_complete, reason=reason),
             })
 
         def failure(status: str, reason: str) -> SkuResult:
@@ -106,6 +107,7 @@ class ProductSkuClient:
             response = None
             chunks = []
             body_complete = False
+            decoded_text = None
             retry = False
             notify(self.request_control, "before_request")
             try:
@@ -162,6 +164,7 @@ class ProductSkuClient:
                         text = decode_html(body, response.headers.get("Content-Type", ""))
                     except ValueError as exc:
                         return failure("parse_failed", str(exc))
+                    decoded_text = text
                     result = parse_detail(text, canonical)
                     if result.status not in ("success", "partial_success") or not result.skus:
                         capture(result.reason)

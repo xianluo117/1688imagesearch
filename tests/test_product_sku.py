@@ -118,6 +118,23 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parse_detail(page(dict(business(), title="captcha x5sec 验证码")), URL).ok)
         self.assertTrue(parse_detail(page(business(), '<script>window._config_ = {broken};</script>'), URL).ok)
 
+    def test_offline_dom_precedes_scripts_and_stale_skus(self):
+        html = '<div class="mod mod-detail-offline"><h3>商品已下架</h3></div>'
+        html += '<script>(function(){return /PC/.test("PC")})()</script>'
+        result = parse_detail(page(business(), html), URL)
+        self.assertEqual((result.status, result.reason), ("source_not_applicable", "product_offline"))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.skus, [])
+        self.assertIsNone(result.title)
+
+    def test_offline_keywords_and_similar_classes_do_not_block(self):
+        for prefix in ('商品已下架', '<!-- <div class="mod-detail-offline"> -->',
+                       '<script>var text="mod-detail-offline";window.hasWinportClosed=true;</script>',
+                       '<div class="mod-detail-offline-title">商品已下架</div>'):
+            self.assertTrue(parse_detail(page(business(), prefix), URL).ok)
+        html = '<div class="mod-detail-offline"></div><form action="https://login.1688.com/"></form>'
+        self.assertEqual(parse_detail(html, URL).status, "login_required")
+
     def test_main_image_is_bound_to_current_product(self):
         meta = '<meta property="og:url" content="{}"><meta property="og:image" content="https://img.example/a.jpg?x=1&y=2">'
         self.assertEqual(parse_detail(page(business(), meta.format(URL)), URL).main_image,
@@ -208,6 +225,29 @@ class ObservedStructureTests(unittest.TestCase):
     def test_wrapper_comments_and_strings(self):
         wrapper = 'function f(){/* } */ var x="}"; // }\\n return {x:1};} '
         self.assertTrue(parse_detail('<script>' + wrapper.replace('\\n', '\n') + json.dumps(business()) + '</script>', URL).ok)
+
+    def test_unsupported_function_is_isolated_to_entire_script(self):
+        functions = ['function f(){return n/1e3;}',
+                     'function f(){return /[}]/.test(n);}',
+                     'function f(){return `value${n}`;}']
+        valid = page(business())
+        for function in functions:
+            for html in (valid + '<script>' + function + '</script>',
+                         '<script>' + function + '</script>' + valid):
+                with self.subTest(function=function, html=html):
+                    result = parse_detail(html, URL)
+                    self.assertTrue(result.ok)
+                    self.assertIn("malformed_other_candidate", result.warnings)
+            # Roots before the unsafe function are also discarded. Never scan
+            # past regex braces to salvage function-local or trailing objects.
+            html = '<script>' + json.dumps(business()) + ';' + function + json.dumps(business()) + '</script>'
+            self.assertFalse(parse_detail(html, URL).ok)
+
+    def test_invalid_function_wrapper_and_limits_still_fail_closed(self):
+        for function, reason in [('function f(){', 'invalid_function_wrapper'),
+                                 ('function f(){' + '{' * 33, 'structure_limit')]:
+            result = parse_detail(page(business()) + '<script>' + function + '</script>', URL)
+            self.assertEqual((result.status, result.reason), ('parse_failed', reason))
 
     def test_numeric_key_limits_and_duplicates(self):
         for keys in ('01:0', '9007199254740992:0', '1:0,"1":1'):
@@ -599,6 +639,19 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(result.skus[0].specifications[0].value, "蓝色")
             self.assertTrue(response.closed)
             self.assertEqual(session.calls[0][1]["accept_encoding"], "gzip, deflate, br")
+
+    def test_gb_offline_diagnostics_reuse_decoded_body(self):
+        from types import SimpleNamespace
+        events = []
+        control = SimpleNamespace(before_request=lambda: None, capture_details=events.append)
+        text = '<meta charset="gbk"><div class="mod-detail-offline">商品已下架，蓝色</div>'
+        response = FakeResponse(body=text.encode("gbk"))
+        result, session = self.fetch([response], request_control=control)
+        self.assertEqual((result.status, result.reason), ("source_not_applicable", "product_offline"))
+        self.assertEqual(events[0]["http"]["body"], text)
+        self.assertTrue(events[0]["http"]["body_complete"])
+        self.assertTrue(response.closed)
+        self.assertEqual(len(session.calls), 1)
 
     def test_encoding_failure_reasons_are_compatible_and_close_response(self):
         for body, header, reason in ((b"\xff", "", "unsupported_encoding"),

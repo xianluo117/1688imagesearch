@@ -32,12 +32,15 @@ class Page(HTMLParser):
         self.meta: dict[str, set[str]] = {}
         self.blocked: str | None = None
         self.blocked_reason: str | None = None
+        self.offline = False
         self._script: list[str] | None = None
         self.feed(text)
         self.close()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs = dict(attrs)
+        if tag == "div" and "mod-detail-offline" in (attrs.get("class") or "").split():
+            self.offline = True
         if tag == "script":
             self._script = []
         target = attrs.get("action") if tag == "form" else attrs.get("src") if tag in {"script", "iframe"} else None
@@ -178,13 +181,23 @@ def json_roots(page: Page) -> tuple[list[Any], bool]:
     attempts = 0
     malformed = False
     for script in page.scripts:
+        script_root_start = len(roots)
         index = 0
         while index < len(script):
             char = script[index]
             if script.startswith("function", index) and (index == 0 or not re.match(r"[\w$]", script[index - 1])):
                 function = FUNCTION.match(script, index)
                 if function:
-                    index = skip_function_body(script, function.end() - 1)
+                    try:
+                        index = skip_function_body(script, function.end() - 1)
+                    except DecodeLimit as exc:
+                        if str(exc) not in {"unsupported_function_token", "unsupported_function_template"}:
+                            raise
+                        # No lexical guessing: discard this entire script, including
+                        # earlier roots, and continue only at the next HTML script.
+                        del roots[script_root_start:]
+                        malformed = True
+                        break
                     continue
             if script.startswith("//", index):
                 end = script.find("\n", index + 2)
