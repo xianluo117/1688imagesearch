@@ -32,6 +32,7 @@ from .console_page import CONSOLE_PAGE
 from .dingtalk import DingTalkNotifier
 from .queue_api import router as queue_router, scheduler_status
 from .queue_page import QUEUE_PAGE
+from .product_test import router as product_test_router
 from .settings_api import router as settings_router, load_settings
 from .sku_http import idempotency_key
 from .sku import router as sku_router
@@ -134,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sku_router)
     app.include_router(sku_v2_router)
     app.include_router(queue_router)
+    app.include_router(product_test_router)
     app.include_router(settings_router)
 
     @app.exception_handler(AccountDeletingError)

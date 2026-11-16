@@ -79,7 +79,7 @@ dialog { width: min(900px,92vw); max-height: 85vh; border: 1px solid #e5eaf2; bo
 <thead><tr><th><input id="selectAll" type="checkbox"></th><th>序号</th><th>类型</th><th>状态</th><th>任务 ID</th><th>依赖任务</th><th>创建时间</th><th>开始时间</th><th>取消请求</th></tr></thead>
 <tbody id="tasks"><tr><td colspan="9" class="empty">请输入 API Key 后加载</td></tr></tbody>
 </table></div><div class="table-footer"><span id="pageInfo">第 1 页</span><div class="pagination"><button id="firstPage" class="secondary">首页</button><button id="prevPage" class="secondary">上一页</button><button id="nextPage" class="secondary">下一页</button><button id="lastPage" class="secondary">末页</button><label for="pageNumber">页码</label><input id="pageNumber" type="number" min="1" max="1" step="1" value="1"><button id="jumpPage" class="secondary">跳转</button></div></div></section>
-<dialog id="errorDialog"><div class="dialog-head"><div><h2>任务详情</h2><span class="subtle">执行结果与完整诊断记录</span></div><div><button id="copyDetails" class="secondary">复制 JSON</button> <button id="closeDetails">关闭</button></div></div><pre id="errorDetails"></pre></dialog>
+<dialog id="errorDialog"><div class="dialog-head"><div><h2 id="detailsTitle">任务详情</h2><span class="subtle">执行结果与完整诊断记录</span></div><div><button id="copyDetails" class="secondary">复制 JSON</button> <button id="closeDetails">关闭</button></div></div><pre id="errorDetails"></pre></dialog>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -203,8 +203,47 @@ function renderAccounts(accounts) {
       testButton.className = 'secondary';
       const testStatus = document.createElement('span');
       testStatus.setAttribute('role', 'status');
-      editor = { row, label, input, button, remove, status, testButton, testStatus, dirty: false, testing: false, deleting: false, revision: 0 };
+      const productInput = document.createElement('input');
+      productInput.placeholder = '1688 商品链接';
+      productInput.setAttribute('aria-label', `${account.display_name} 产品测试链接`);
+      const productButton = document.createElement('button');
+      productButton.textContent = '产品测试';
+      const productStatus = document.createElement('span');
+      productStatus.setAttribute('role', 'status');
+      const productDetails = document.createElement('button');
+      productDetails.className = 'secondary';
+      productDetails.textContent = '产品测试详情';
+      productDetails.hidden = true;
+      editor = { row, label, input, button, remove, status, testButton, testStatus, productButton, productInput, productStatus, productDetails, productTesting: false, productResult: null, dirty: false, testing: false, deleting: false, revision: 0 };
       const current = editor;
+      productDetails.onclick = () => {
+        $('detailsTitle').textContent = `产品测试（独立诊断） · ${account.display_name}`;
+        $('errorDetails').textContent = JSON.stringify(current.productResult, null, 2);
+        $('errorDialog').showModal();
+      };
+      productButton.onclick = async () => {
+        current.productTesting = true;
+        productButton.disabled = true;
+        productStatus.textContent = '产品测试中…';
+        productDetails.hidden = true;
+        const started = performance.now();
+        try {
+          const response = await fetch(`/api/v1/accounts/${encodeURIComponent(account.account_id)}/product-test`, {
+            method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_url: productInput.value.trim() }),
+          });
+          const result = await response.json();
+          current.productResult = result;
+          productStatus.textContent = `${response.ok && result.success ? '产品测试成功' : '产品测试失败'} · ${result.elapsed_ms ?? Math.round(performance.now() - started)} ms`;
+        } catch (error) {
+          current.productResult = { kind: 'account_product_test', account_id: account.account_id, error: { message: error.message, stack: error.stack } };
+          productStatus.textContent = `产品测试失败 · ${Math.round(performance.now() - started)} ms`;
+        } finally {
+          current.productTesting = false;
+          productButton.disabled = current.deleting;
+          productDetails.hidden = false;
+        }
+      };
       input.oninput = () => { current.dirty = true; current.revision++; status.textContent = ''; testStatus.textContent = ''; };
       testButton.onclick = async () => {
         const value = input.value.trim();
@@ -246,13 +285,15 @@ function renderAccounts(accounts) {
         } catch (error) { status.textContent = error.message; }
         finally { button.disabled = false; }
       };
-      row.append(label, input, button, testButton, remove, status, testStatus);
+      row.append(label, input, button, testButton, remove, status, testStatus, productInput, productButton, productStatus, productDetails);
       $('accounts').append(row);
       accountEditors.set(account.account_id, editor);
     }
     editor.label.textContent = `${account.display_name}: ${accountLabels[account.state] || account.state}${account.reason ? ' / ' + account.reason : ''}`;
     editor.deleting = account.state === 'deleting';
     editor.testButton.disabled = editor.testing || editor.deleting;
+    editor.productButton.disabled = editor.productTesting || editor.deleting;
+    editor.productInput.disabled = editor.deleting;
     editor.remove.disabled = account.state === 'deleting';
     editor.remove.textContent = account.state === 'deleting' ? '删除中' : '删除';
     editor.input.disabled = account.state === 'deleting';
@@ -322,6 +363,7 @@ $('tasks').onclick = async event => {
   try {
     const response = await fetch(`/api/v1/queue/tasks/${encodeURIComponent(button.dataset.id)}/details`, { headers: headers() });
     if (!response.ok) throw new Error(`详情查询失败（${response.status}）`);
+    $('detailsTitle').textContent = '队列任务详情';
     $('errorDetails').textContent = JSON.stringify(await response.json(), null, 2);
     $('errorDialog').showModal();
   } catch (error) { showError(error.message); }
