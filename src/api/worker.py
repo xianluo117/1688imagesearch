@@ -70,7 +70,7 @@ class QueueTaskExecutor:
                 cookie_version = row[0]
             _, records = await self.cookie_store.load_version(cookie_version)
             execute_sku_sync = execute_sku_sync or partial(
-                self.sku_sync, proxy_url=proxy_url, browser_profile=chrome_identity(task.task_id),
+                self.sku_sync, proxy_url=proxy_url, browser_profile=chrome_identity(task.account_id),
             )
             return await run_sync(execute_sku_sync, task.payload["product_url"], records, control)
         if task.kind == "upload":

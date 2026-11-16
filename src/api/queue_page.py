@@ -215,7 +215,7 @@ function renderAccounts(accounts) {
         try {
           const response = await fetch('/api/v1/proxy-test', {
             method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
-            body: JSON.stringify({ proxy_url: value }),
+            body: JSON.stringify({ proxy_url: value, account_id: account.account_id }),
           });
           const result = await response.json();
           if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `测试失败（${response.status}）`);

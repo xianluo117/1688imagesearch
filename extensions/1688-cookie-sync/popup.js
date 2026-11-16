@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const stored = await chrome.storage.local.get(['config', 'account', 'lastResult', 'lastTime']);
-$('server').value = stored.config?.server || '';
-$('key').value = stored.config?.key || '';
+$('server').value = stored.config?.server ?? 'https://1688imagesearch.xiaoc-ai.com';
+$('key').value = stored.config?.key ?? 'vphjUnXazFW9VljwdF-qKWY4RVcCbBry_NFpGCTaxDU';
 $('checkUrl').value = stored.config?.checkUrl || 'https://detail.1688.com/offer/1051566710086.html';
 function render(data) {
   $('account').textContent = data.account || '未同步';
