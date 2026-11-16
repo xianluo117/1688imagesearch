@@ -252,6 +252,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         metadata = await cookie_store.save(
             body["cookie_payload"], account_id=body["account_id"],
             display_name=body.get("display_name"), confirmed_login=True,
+            user_agent=body.get("user_agent"),
         )
         return {"status": "updated", "account_id": body["account_id"], **metadata}
 

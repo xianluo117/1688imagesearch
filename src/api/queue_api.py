@@ -121,11 +121,12 @@ class ProxyTestRequest(BaseModel):
 
 
 @router.post("/api/v1/proxy-test")
-async def run_proxy_test(body: ProxyTestRequest):
+async def run_proxy_test(body: ProxyTestRequest, request: Request):
     proxy_url = body.proxy_url.strip()
     if proxy_url and not proxy_url.startswith(("http://", "socks5://", "socks5h://")):
         raise HTTPException(400, detail="代理地址须以 http://、socks5:// 或 socks5h:// 开头")
-    return await test_proxy(proxy_url, account_id=body.account_id)
+    user_agent = await request.app.state.database.get_account_user_agent(body.account_id)
+    return await test_proxy(proxy_url, account_id=body.account_id, user_agent=user_agent)
 
 
 @router.put("/api/v1/accounts/{account_id}/proxy")

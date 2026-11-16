@@ -26,7 +26,7 @@ class ProductSkuClient:
                  session: Any | None = None, timeout: float = 20,
                  network_retries: int = 1, max_bytes: int = MAX_BYTES,
                  request_control: RequestControl | None = None, proxy_url: str = "",
-                 browser_profile: str | None = None):
+                 browser_profile: str | None = None, user_agent: str | None = None):
         if (cookie_file is None) == (cookie_records is None):
             raise ValueError("provide_exactly_one_cookie_source")
         if not math.isfinite(timeout) or not 0 < timeout <= 120:
@@ -42,6 +42,8 @@ class ProductSkuClient:
             raise ValueError("cookie_load_failed") from None
         self._owned = session is None
         self.session = requests.Session(impersonate=browser_profile or chrome_identity(), trust_env=False, proxies={"all": proxy_url}) if self._owned else session
+        if self._owned and user_agent:
+            self.session.headers["User-Agent"] = user_agent
         try:
             # curl_cffi accepts a CookieJar; do not flatten it to name/value pairs.
             self.session.cookies = requests.Cookies(jar)

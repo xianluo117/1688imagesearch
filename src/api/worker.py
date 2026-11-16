@@ -62,6 +62,7 @@ class QueueTaskExecutor:
     async def execute(self, task, control, run_sync, execute_sku_sync):
         proxy_url = await self.database.get_account_proxy(task.account_id)
         if task.kind == "sku":
+            user_agent = await self.database.get_account_user_agent(task.account_id)
             cookie_version = task.payload.get("cookie_version")
             if cookie_version is None:
                 row = await self.database.get_active_cookie(task.account_id)
@@ -71,6 +72,7 @@ class QueueTaskExecutor:
             _, records = await self.cookie_store.load_version(cookie_version)
             execute_sku_sync = execute_sku_sync or partial(
                 self.sku_sync, proxy_url=proxy_url, browser_profile=chrome_identity(task.account_id),
+                user_agent=user_agent,
             )
             return await run_sync(execute_sku_sync, task.payload["product_url"], records, control)
         if task.kind == "upload":
@@ -127,11 +129,11 @@ class QueueTaskExecutor:
         finally:
             client.session.close()
 
-    def sku_sync(self, url, records, control, proxy_url="", browser_profile=None):
+    def sku_sync(self, url, records, control, proxy_url="", browser_profile=None, user_agent=None):
         try:
             client = ProductSkuClient(cookie_records=records, timeout=self.settings.sku_http_timeout,
                                       network_retries=0, request_control=control, proxy_url=proxy_url,
-                                      browser_profile=browser_profile)
+                                      browser_profile=browser_profile, user_agent=user_agent)
         except ValueError:
             raise CookieStoreError("服务器没有可用的 1688 Cookie") from None
         with client as active_client:

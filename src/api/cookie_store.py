@@ -41,7 +41,8 @@ class CookieStore:
         }
 
     async def save(self, payload: Any, *, account_id: str = "default",
-                   display_name: str | None = None, confirmed_login: bool = False) -> dict[str, Any]:
+                   display_name: str | None = None, confirmed_login: bool = False,
+                   user_agent: str | None = None) -> dict[str, Any]:
         records, metadata = self._validate_payload(payload)
         serialized = json.dumps(
             {"cookies": [asdict(record) for record in records]},
@@ -56,6 +57,7 @@ class CookieStore:
             account_id=account_id,
             display_name=display_name,
             confirmed_login=confirmed_login,
+            user_agent=user_agent,
         )
         return {"version": version, **metadata}
 

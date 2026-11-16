@@ -77,7 +77,8 @@ async function synchronize() {
   }
   await post(config, '/api/v1/accounts/sync', {
     account_id: identity.nickname, display_name: identity.nickname,
-    identity_source: identity.identitySource, login_confirmed: true, cookie_payload: payload
+    identity_source: identity.identitySource, login_confirmed: true, cookie_payload: payload,
+    user_agent: navigator.userAgent
   });
   await chrome.storage.local.set({account: identity.nickname, lastResult: '同步成功', lastTime: Date.now()});
   await chrome.tabs.remove([tabId, identityTab]);

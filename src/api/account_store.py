@@ -14,6 +14,7 @@ async def initialize_accounts(db):
         ("reason", "TEXT"),
         ("until", "REAL"),
         ("proxy_url", "TEXT NOT NULL DEFAULT ''"),
+        ("user_agent", "TEXT NOT NULL DEFAULT ''"),
     ):
         if name not in columns:
             await db.execute(f"ALTER TABLE accounts ADD COLUMN {name} {declaration}")
@@ -22,6 +23,12 @@ async def initialize_accounts(db):
 
 
 class AccountStoreMixin:
+    async def get_account_user_agent(self, account_id):
+        async with self._queue_connection() as db:
+            cursor = await db.execute("SELECT user_agent FROM accounts WHERE account_id=?", (account_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else ""
+
     async def get_account_proxy(self, account_id):
         async with self._queue_connection() as db:
             cursor = await db.execute("SELECT proxy_url FROM accounts WHERE account_id=?", (account_id,))

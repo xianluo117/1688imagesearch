@@ -253,6 +253,7 @@ class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertSt
         account_id: str = "default",
         display_name: str | None = None,
         confirmed_login: bool = False,
+        user_agent: str | None = None,
     ) -> int:
         now = time.time()
         async with aiosqlite.connect(self.path) as db:
@@ -274,6 +275,8 @@ class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertSt
             version = int(cursor.lastrowid)
             if display_name is not None:
                 await db.execute("UPDATE accounts SET display_name=?, updated_at=? WHERE account_id=?", (display_name, now, account_id))
+            if user_agent is not None:
+                await db.execute("UPDATE accounts SET user_agent=?, updated_at=? WHERE account_id=?", (user_agent, now, account_id))
             if confirmed_login:
                 await db.execute("UPDATE accounts SET state='normal', reason=NULL, until=NULL, updated_at=? WHERE account_id=?", (now, account_id))
                 await db.execute("UPDATE account_alert_cycles SET active=0 WHERE account_id=?", (account_id,))
