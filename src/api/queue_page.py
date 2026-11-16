@@ -170,7 +170,7 @@ function renderAccounts(accounts) {
       row.className = 'account';
       const label = document.createElement('span');
       const input = document.createElement('input');
-      input.placeholder = 'http:// 或 socks5://，留空直连';
+      input.placeholder = 'http://、socks5:// 或 socks5h://，留空直连';
       input.setAttribute('aria-label', `${account.display_name} 代理地址`);
       input.autocomplete = 'off';
       input.spellcheck = false;

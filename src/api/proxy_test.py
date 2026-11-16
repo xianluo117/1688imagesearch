@@ -13,9 +13,9 @@ async def test_proxy(proxy_url: str) -> dict:
         async with requests.AsyncSession(
             impersonate=chrome_identity(), trust_env=False, proxies={"all": proxy_url},
         ) as session:
-            response = await session.get("https://api.ipify.org?format=json", timeout=15)
+            response = await session.get("https://icanhazip.com", timeout=15)
             response.raise_for_status()
-            result.update(success=True, ip=response.json()["ip"])
+            result.update(success=True, ip=response.text.strip())
     except (requests.RequestsError, ValueError, KeyError) as exc:
         result["error"] = str(exc)
     result["elapsed_ms"] = round((perf_counter() - started) * 1000)

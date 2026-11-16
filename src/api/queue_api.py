@@ -118,16 +118,16 @@ class AccountProxyRequest(BaseModel):
 @router.post("/api/v1/proxy-test")
 async def run_proxy_test(body: AccountProxyRequest):
     proxy_url = body.proxy_url.strip()
-    if proxy_url and not proxy_url.startswith(("http://", "socks5://")):
-        raise HTTPException(400, detail="代理地址须以 http:// 或 socks5:// 开头")
+    if proxy_url and not proxy_url.startswith(("http://", "socks5://", "socks5h://")):
+        raise HTTPException(400, detail="代理地址须以 http://、socks5:// 或 socks5h:// 开头")
     return await test_proxy(proxy_url)
 
 
 @router.put("/api/v1/accounts/{account_id}/proxy")
 async def save_account_proxy(account_id: str, body: AccountProxyRequest, request: Request):
     proxy_url = body.proxy_url.strip()
-    if proxy_url and not proxy_url.startswith(("http://", "socks5://")):
-        raise HTTPException(400, detail="代理地址须以 http:// 或 socks5:// 开头")
+    if proxy_url and not proxy_url.startswith(("http://", "socks5://", "socks5h://")):
+        raise HTTPException(400, detail="代理地址须以 http://、socks5:// 或 socks5h:// 开头")
     if not await request.app.state.database.set_account_proxy(account_id, proxy_url):
         raise HTTPException(404, detail="账号不存在")
     return {"account_id": account_id, "proxy_url": proxy_url}
