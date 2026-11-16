@@ -39,6 +39,7 @@ class UnifiedQueueScheduler:
         self._drain_task = None
         self._jobs = set()
         self._closing = False
+        self.settings_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._dispatcher is not None:
@@ -50,7 +51,8 @@ class UnifiedQueueScheduler:
             raise RuntimeError("该 Database 已有统一调度器")
         self.database._scheduler_owner = self
         self.database.accepting = True
-        self._pool = ThreadPoolExecutor(max_workers=self.settings.global_worker_count,
+        # Threads are created lazily; admission below enforces the current limit.
+        self._pool = ThreadPoolExecutor(max_workers=32,
                                         thread_name_prefix="1688-unified")
         self._dispatcher = asyncio.create_task(self._dispatch(), name="1688-dispatcher")
 
@@ -77,16 +79,17 @@ class UnifiedQueueScheduler:
     async def _dispatch(self) -> None:
         while not self._closing:
             try:
-                if len(self._jobs) < self.settings.global_worker_count:
-                    task = await self.database.claim_next_task(
-                        max_running=self.settings.global_worker_count,
-                        max_account_running=self.settings.account_max_concurrency,
-                    )
-                    if task is not None:
-                        job = asyncio.create_task(self._run(task), name=f"queue-{task.task_id}")
-                        self._jobs.add(job)
-                        job.add_done_callback(self._finished)
-                        continue
+                async with self.settings_lock:
+                    if len(self._jobs) < self.settings.global_worker_count:
+                        task = await self.database.claim_next_task(
+                            max_running=self.settings.global_worker_count,
+                            max_account_running=self.settings.account_max_concurrency,
+                        )
+                        if task is not None:
+                            job = asyncio.create_task(self._run(task), name=f"queue-{task.task_id}")
+                            self._jobs.add(job)
+                            job.add_done_callback(self._finished)
+                            continue
             except Exception:
                 LOGGER.exception("统一队列领取失败，稍后重试")
             await asyncio.sleep(self.poll_seconds)

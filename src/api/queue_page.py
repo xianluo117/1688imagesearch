@@ -59,10 +59,13 @@ button { font-size: 12px; font-weight: 600; padding: 9px 14px; transition: backg
 dialog { width: min(900px,92vw); max-height: 85vh; border: 1px solid #e5eaf2; border-radius: 16px; padding: 24px; color: #334155; box-shadow: 0 24px 80px #1e293b26; }dialog::backdrop { background: #1e293b55; backdrop-filter: blur(3px); }.dialog-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; }pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f7f9fc; padding: 18px; border-radius: 10px; font-size: 12px; max-height: 58vh; overflow: auto; }
 @media(max-width:1200px) { .cards { grid-template-columns: repeat(3,1fr); }.page-head { align-items: flex-start; flex-direction: column; } }
 @media(max-width:760px) { .sidebar { position: static; width: auto; padding: 16px; border-bottom: 1px solid #e5eaf2; }.brand { margin-bottom: 12px; }.nav-label,.sidebar-foot { display: none; }nav { display: flex; gap: 8px; }nav a { flex: 1; margin: 0; }main { margin: 0; padding: 24px 14px; }.cards { gap: 8px; }.card { padding: 12px; }.card strong { font-size: 24px; }.section-head { padding: 16px; }.accounts { padding: 0 16px 16px; }.filters { padding: 0 16px 16px; }.filters .subtle { margin-left: 0; }.head-actions { gap: 6px; }.auth-panel summary span { display: block; margin-left: 16px; } }
+.table-footer { flex-wrap: wrap; gap: 12px; }
+.pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#pageNumber { width: 80px; }
 </style>
 </head>
 <body>
-<aside class="sidebar"><a class="brand" href="/queue"><b>1688</b><span>WORKSPACE<small>采集管理工作台</small></span></a><div class="nav-label">工作空间</div><nav><a class="active" href="/queue">任务队列 <span>01</span></a><a href="/console">告警设置 <span>02</span></a></nav><div class="sidebar-foot">轻量管理 · 清晰执行<br>队列 / 账号 / 运行状态</div></aside>
+<aside class="sidebar"><a class="brand" href="/queue"><b>1688</b><span>WORKSPACE<small>采集管理工作台</small></span></a><div class="nav-label">工作空间</div><nav><a class="active" href="/queue">任务队列 <span>01</span></a><a href="/console">告警设置 <span>02</span></a><a href="/setting">运行设置 <span>03</span></a></nav><div class="sidebar-foot">轻量管理 · 清晰执行<br>队列 / 账号 / 运行状态</div></aside>
 <main>
 <header class="page-head"><div><div class="eyebrow">WORKSPACE / OVERVIEW</div><h1>任务队列</h1><p>关注执行结果，让任务与账号状态一目了然。</p></div><div class="head-actions"><span id="updatedAt">尚未连接</span><button id="autoRefresh" class="secondary">暂停自动刷新</button><button id="refresh">刷新数据</button></div></header>
 <details class="auth-panel"><summary>访问凭据 <span>仅保存在当前浏览器会话</span></summary><div class="toolbar"><input id="apiKey" type="password" placeholder="输入 SEARCH_API_KEY" aria-label="API 密钥" autocomplete="off"><button id="saveKey">保存并连接</button></div></details>
@@ -75,7 +78,7 @@ dialog { width: min(900px,92vw); max-height: 85vh; border: 1px solid #e5eaf2; bo
 <div class="table-wrap"><table>
 <thead><tr><th><input id="selectAll" type="checkbox"></th><th>序号</th><th>类型</th><th>状态</th><th>任务 ID</th><th>依赖任务</th><th>创建时间</th><th>开始时间</th><th>取消请求</th></tr></thead>
 <tbody id="tasks"><tr><td colspan="9" class="empty">请输入 API Key 后加载</td></tr></tbody>
-</table></div><div class="table-footer"><span id="pageInfo">第 1 页</span><div><button id="prevPage" class="secondary">上一页</button> <button id="nextPage" class="secondary">下一页</button></div></div></section>
+</table></div><div class="table-footer"><span id="pageInfo">第 1 页</span><div class="pagination"><button id="firstPage" class="secondary">首页</button><button id="prevPage" class="secondary">上一页</button><button id="nextPage" class="secondary">下一页</button><button id="lastPage" class="secondary">末页</button><label for="pageNumber">页码</label><input id="pageNumber" type="number" min="1" max="1" step="1" value="1"><button id="jumpPage" class="secondary">跳转</button></div></div></section>
 <dialog id="errorDialog"><div class="dialog-head"><div><h2>任务详情</h2><span class="subtle">执行结果与完整诊断记录</span></div><div><button id="copyDetails" class="secondary">复制 JSON</button> <button id="closeDetails">关闭</button></div></div><pre id="errorDetails"></pre></dialog>
 </main>
 <script>
@@ -84,6 +87,7 @@ const labels = { queued: '排队中', running: '执行中', succeeded: '成功',
 const counts = ['queued', 'running', 'succeeded', 'failed', 'cancelled'];
 let taskRows = [];
 let pageIndex = 0;
+let pageCount = 1;
 let refreshing = false;
 let automatic = true;
 const pageSize = 25;
@@ -141,13 +145,18 @@ function renderTasks() {
   const query = $('search').value.trim().toLowerCase();
   for (const id of selected) if (!taskRows.some(t => t.task_id === id && cancellable(t))) selected.delete(id);
   const filtered = taskRows.filter(task => (!kind || task.kind === kind) && (!status || task.status === status) &&
-    (!query || `${task.task_id} ${task.account_id || ''}`.toLowerCase().includes(query)));
-  pageIndex = Math.max(0, Math.min(pageIndex, Math.ceil(filtered.length / pageSize) - 1));
+    (!query || `${task.task_id} ${task.account_id || ''}`.toLowerCase().includes(query)))
+    .sort((a, b) => b.created_at - a.created_at || b.seq - a.seq);
+  pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  pageIndex = Math.max(0, Math.min(pageIndex, pageCount - 1));
   const rows = filtered.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
   $('taskCount').textContent = `${filtered.length} 条`;
-  $('pageInfo').textContent = `第 ${pageIndex + 1} / ${Math.max(1, Math.ceil(filtered.length / pageSize))} 页 · 每页 ${pageSize} 条`;
-  $('prevPage').disabled = pageIndex === 0;
-  $('nextPage').disabled = (pageIndex + 1) * pageSize >= filtered.length;
+  $('pageInfo').textContent = `第 ${pageIndex + 1} / ${pageCount} 页 · 每页 ${pageSize} 条`;
+  $('firstPage').disabled = $('prevPage').disabled = pageIndex === 0;
+  $('lastPage').disabled = $('nextPage').disabled = pageIndex === pageCount - 1;
+  $('pageNumber').max = pageCount;
+  if (document.activeElement !== $('pageNumber')) $('pageNumber').value = pageIndex + 1;
+  $('pageNumber').disabled = $('jumpPage').disabled = !filtered.length;
   $('tasks').innerHTML = rows.length ? rows.map(task => `<tr>
     <td><input class="task-check" aria-label="选择任务 ${text(task.task_id)}" type="checkbox" value="${text(task.task_id)}" ${cancellable(task) ? '' : 'disabled'} ${selected.has(task.task_id) ? 'checked' : ''}></td><td>${text(task.seq)}</td><td>${text(kindLabels[task.kind] || task.kind)}</td>
     <td>${renderTaskStatus(task)}</td>
@@ -277,8 +286,17 @@ async function refresh() {
 $('saveKey').onclick = () => { sessionStorage.setItem('queue-api-key', $('apiKey').value.trim()); sessionStorage.setItem('console-api-key', $('apiKey').value.trim()); refresh(); };
 $('refresh').onclick = refresh;
 for (const id of ['kindFilter', 'statusFilter', 'search']) $(id).addEventListener(id === 'search' ? 'input' : 'change', () => { pageIndex = 0; renderTasks(); });
+$('firstPage').onclick = () => { pageIndex = 0; renderTasks(); };
 $('prevPage').onclick = () => { pageIndex--; renderTasks(); };
 $('nextPage').onclick = () => { pageIndex++; renderTasks(); };
+$('lastPage').onclick = () => { pageIndex = pageCount - 1; renderTasks(); };
+function jumpToPage() {
+  if (!$('pageNumber').value || !$('pageNumber').reportValidity()) return;
+  pageIndex = Number($('pageNumber').value) - 1;
+  renderTasks();
+}
+$('jumpPage').onclick = jumpToPage;
+$('pageNumber').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); jumpToPage(); } };
 $('autoRefresh').onclick = () => { automatic = !automatic; $('autoRefresh').textContent = automatic ? '暂停自动刷新' : '恢复自动刷新'; };
 $('selectAll').onchange = event => {
   document.querySelectorAll('.task-check:not(:disabled)').forEach(box => { box.checked = event.target.checked; box.checked ? selected.add(box.value) : selected.delete(box.value); });

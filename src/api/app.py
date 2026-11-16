@@ -32,6 +32,7 @@ from .console_page import CONSOLE_PAGE
 from .dingtalk import DingTalkNotifier
 from .queue_api import router as queue_router, scheduler_status
 from .queue_page import QUEUE_PAGE
+from .settings_api import router as settings_router, load_settings
 from .sku_http import idempotency_key
 from .sku import router as sku_router
 from .sku_service import ProductSkuService
@@ -107,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await database.initialize()
+        await load_settings(_app)
         await notifier.start()
         await scheduler.start()
         await cleanup_service.start()
@@ -132,6 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sku_router)
     app.include_router(sku_v2_router)
     app.include_router(queue_router)
+    app.include_router(settings_router)
 
     @app.exception_handler(AccountDeletingError)
     async def account_deleting(_request: Request, exc: AccountDeletingError):

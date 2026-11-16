@@ -14,6 +14,7 @@ from .account_store import AccountStoreMixin, initialize_accounts
 from .account_deletion import AccountDeletionMixin, AccountDeletingError, migrate_account_deletion
 from .queue_schema import initialize_queue
 from .queue_store import QueueStoreMixin
+from .settings_store import SettingsStoreMixin, initialize_settings
 
 TaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
@@ -54,7 +55,7 @@ class ProductTaskRecord:
     finished_at: float | None
 
 
-class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertStoreMixin):
+class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertStoreMixin, SettingsStoreMixin):
     def __init__(self, path: str | Path, *, queue_capacity: int = 100) -> None:
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be positive")
@@ -181,6 +182,7 @@ class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertSt
             db.row_factory = aiosqlite.Row
             await initialize_queue(db, now)
             await initialize_alerts(db)
+            await initialize_settings(db)
             await db.commit()
         await self.recover_account_deletions()
 

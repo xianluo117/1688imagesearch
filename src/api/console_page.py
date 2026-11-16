@@ -79,7 +79,7 @@ th:first-child { width: 34%; } th:nth-child(2) { width: 25%; }
 <aside class="sidebar">
   <div class="brand"><span>1688</span> WORKSPACE</div>
   <div class="brand-caption">图搜任务管理工作台</div>
-  <nav aria-label="主导航"><a href="/queue">任务队列</a><a href="/console" aria-current="page">告警设置</a></nav>
+  <nav aria-label="主导航"><a href="/queue">任务队列</a><a href="/console" aria-current="page">告警设置</a><a href="/setting">运行设置</a></nav>
   <div class="sidebar-note">工作台 / 通知管理<br>安全连接 · 按需配置</div>
 </aside>
 <main><div class="content">

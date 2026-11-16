@@ -75,8 +75,28 @@ class RequestGuard:
         self.poll_seconds = poll_seconds
         self._next_request = 0.0
         self._account_next_request: dict[str, float] = {}
+        self._last_request: float | None = None
+        self._account_last_request: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self.stopping = False
+
+    def update_settings(self, settings) -> None:
+        """Called on the owning loop; rebase cached deadlines, not active requests."""
+        old = self.settings
+        self.settings = settings
+        if (old.request_interval_min_seconds, old.request_interval_max_seconds) != (
+            settings.request_interval_min_seconds, settings.request_interval_max_seconds
+        ) and self._last_request is not None:
+            self._next_request = self._last_request + self.uniform(
+                settings.request_interval_min_seconds, settings.request_interval_max_seconds)
+        if (old.account_request_interval_min_seconds, old.account_request_interval_max_seconds) != (
+            settings.account_request_interval_min_seconds, settings.account_request_interval_max_seconds
+        ):
+            self._account_next_request = {
+                account_id: last + self.uniform(settings.account_request_interval_min_seconds,
+                                                settings.account_request_interval_max_seconds)
+                for account_id, last in self._account_last_request.items()
+            }
 
     def bind(self, task_id: str, budget: ExecutionBudget, account_id: str = "default") -> "BoundRequestControl":
         return BoundRequestControl(self, task_id, budget, account_id, asyncio.get_running_loop())
@@ -126,6 +146,8 @@ class RequestGuard:
                                 self.settings.request_interval_max_seconds,
                             )
                             self._account_next_request[account_id] = now + interval
+                            self._last_request = now
+                            self._account_last_request[account_id] = now
                             return
                         delay = min(delay, self.poll_seconds)
                 await self.sleep(delay)
