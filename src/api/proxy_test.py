@@ -1,0 +1,22 @@
+"""Independent asynchronous egress check; never changes account state."""
+from time import perf_counter
+
+from curl_cffi import requests
+
+from request_identity import chrome_identity
+
+
+async def test_proxy(proxy_url: str) -> dict:
+    started = perf_counter()
+    result = {"success": False, "mode": "proxy" if proxy_url else "direct", "ip": None, "error": None}
+    try:
+        async with requests.AsyncSession(
+            impersonate=chrome_identity(), trust_env=False, proxies={"all": proxy_url},
+        ) as session:
+            response = await session.get("https://api.ipify.org?format=json", timeout=15)
+            response.raise_for_status()
+            result.update(success=True, ip=response.json()["ip"])
+    except (requests.RequestsError, ValueError, KeyError) as exc:
+        result["error"] = str(exc)
+    result["elapsed_ms"] = round((perf_counter() - started) * 1000)
+    return result

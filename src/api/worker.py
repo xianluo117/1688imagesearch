@@ -13,6 +13,7 @@ from image_search.errors import (
     RateLimitError, RiskControlError, TaskCancelledError, TokenError, UploadNoImageIdError,
 )
 from product_sku.client import ProductSkuClient
+from request_identity import chrome_identity
 
 from .cookie_store import CookieStoreError
 from .image_downloader import ImageDownloadError, download_image
@@ -68,7 +69,9 @@ class QueueTaskExecutor:
                     raise CookieStoreError("尚未上传 1688 Cookie")
                 cookie_version = row[0]
             _, records = await self.cookie_store.load_version(cookie_version)
-            execute_sku_sync = execute_sku_sync or partial(self.sku_sync, proxy_url=proxy_url)
+            execute_sku_sync = execute_sku_sync or partial(
+                self.sku_sync, proxy_url=proxy_url, browser_profile=chrome_identity(task.task_id),
+            )
             return await run_sync(execute_sku_sync, task.payload["product_url"], records, control)
         if task.kind == "upload":
             upload = await self.database.get_upload_task(task.task_id)
@@ -124,10 +127,11 @@ class QueueTaskExecutor:
         finally:
             client.session.close()
 
-    def sku_sync(self, url, records, control, proxy_url=""):
+    def sku_sync(self, url, records, control, proxy_url="", browser_profile=None):
         try:
             client = ProductSkuClient(cookie_records=records, timeout=self.settings.sku_http_timeout,
-                                      network_retries=0, request_control=control, proxy_url=proxy_url)
+                                      network_retries=0, request_control=control, proxy_url=proxy_url,
+                                      browser_profile=browser_profile)
         except ValueError:
             raise CookieStoreError("服务器没有可用的 1688 Cookie") from None
         with client as active_client:

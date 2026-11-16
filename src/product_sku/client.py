@@ -10,6 +10,7 @@ from request_control import RequestControl, control_scope, disable_transport_ret
 from image_search.cookies import ImportedCookie, load_cookie_records
 
 from error_details import response_details
+from request_identity import chrome_identity
 from .extraction import MAX_BYTES
 from .detail_images import enrich_detail_images
 from .html_encoding import decode_html
@@ -24,7 +25,8 @@ class ProductSkuClient:
                  cookie_records: list[ImportedCookie] | None = None,
                  session: Any | None = None, timeout: float = 20,
                  network_retries: int = 1, max_bytes: int = MAX_BYTES,
-                 request_control: RequestControl | None = None, proxy_url: str = ""):
+                 request_control: RequestControl | None = None, proxy_url: str = "",
+                 browser_profile: str | None = None):
         if (cookie_file is None) == (cookie_records is None):
             raise ValueError("provide_exactly_one_cookie_source")
         if not math.isfinite(timeout) or not 0 < timeout <= 120:
@@ -39,7 +41,7 @@ class ProductSkuClient:
         except Exception:
             raise ValueError("cookie_load_failed") from None
         self._owned = session is None
-        self.session = requests.Session(impersonate="chrome", trust_env=False, proxies={"all": proxy_url}) if self._owned else session
+        self.session = requests.Session(impersonate=browser_profile or chrome_identity(), trust_env=False, proxies={"all": proxy_url}) if self._owned else session
         try:
             # curl_cffi accepts a CookieJar; do not flatten it to name/value pairs.
             self.session.cookies = requests.Cookies(jar)

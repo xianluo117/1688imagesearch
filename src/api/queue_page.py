@@ -189,9 +189,38 @@ function renderAccounts(accounts) {
           await refresh();
         } catch (error) { showError(error.message); remove.disabled = false; }
       };
-      editor = { row, label, input, button, remove, status, dirty: false };
+      const testButton = document.createElement('button');
+      testButton.textContent = '测试代理';
+      testButton.className = 'secondary';
+      const testStatus = document.createElement('span');
+      testStatus.setAttribute('role', 'status');
+      editor = { row, label, input, button, remove, status, testButton, testStatus, dirty: false, testing: false, deleting: false, revision: 0 };
       const current = editor;
-      input.oninput = () => { current.dirty = true; status.textContent = ''; };
+      input.oninput = () => { current.dirty = true; current.revision++; status.textContent = ''; testStatus.textContent = ''; };
+      testButton.onclick = async () => {
+        const value = input.value.trim();
+        const revision = current.revision;
+        current.testing = true;
+        testButton.disabled = true;
+        testStatus.textContent = value ? '正在测试代理…' : '正在测试直连…';
+        try {
+          const response = await fetch('/api/v1/proxy-test', {
+            method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ proxy_url: value }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `测试失败（${response.status}）`);
+          if (current.revision !== revision || input.value.trim() !== value) return;
+          testStatus.textContent = result.success
+            ? `${result.mode === 'proxy' ? '代理连通' : '直连成功'} · 出口 IP：${result.ip} · ${result.elapsed_ms} ms`
+            : `测试失败 · ${result.elapsed_ms} ms · ${result.error}`;
+        } catch (error) {
+          if (current.revision === revision && input.value.trim() === value) testStatus.textContent = error.message;
+        } finally {
+          current.testing = false;
+          testButton.disabled = current.deleting;
+        }
+      };
       button.onclick = async () => {
         const value = input.value.trim();
         button.disabled = true;
@@ -208,16 +237,22 @@ function renderAccounts(accounts) {
         } catch (error) { status.textContent = error.message; }
         finally { button.disabled = false; }
       };
-      row.append(label, input, button, remove, status);
+      row.append(label, input, button, testButton, remove, status, testStatus);
       $('accounts').append(row);
       accountEditors.set(account.account_id, editor);
     }
     editor.label.textContent = `${account.display_name}: ${accountLabels[account.state] || account.state}${account.reason ? ' / ' + account.reason : ''}`;
+    editor.deleting = account.state === 'deleting';
+    editor.testButton.disabled = editor.testing || editor.deleting;
     editor.remove.disabled = account.state === 'deleting';
     editor.remove.textContent = account.state === 'deleting' ? '删除中' : '删除';
     editor.input.disabled = account.state === 'deleting';
     if (account.state === 'deleting') editor.button.disabled = true;
-    if (!editor.dirty && !editor.button.disabled) editor.input.value = account.proxy_url || '';
+    if (!editor.dirty && !editor.button.disabled && !editor.testing) {
+      const value = account.proxy_url || '';
+      if (editor.input.value !== value) { editor.revision++; editor.testStatus.textContent = ''; }
+      editor.input.value = value;
+    }
   }
 }
 async function refresh() {
