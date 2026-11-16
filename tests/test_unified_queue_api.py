@@ -122,9 +122,32 @@ class UnifiedQueueApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["result"]["status"], "login_required")
         self.assertEqual(body["scheduler"]["state"], "normal")
         self.assertEqual((await self.app.state.database.get_account_state("default"))["state"], "paused")
-        rejected = await self.submit()
-        self.assertEqual(rejected.status_code, 503)
+        waiting = await self.submit()
+        self.assertEqual(waiting.status_code, 202)
+        self.assertEqual(waiting.json()["account_id"], "")
+        self.assertIsNone(waiting.json()["requested_account_id"])
+        self.assertEqual(waiting.json()["status"], "queued")
         self.fake.fetch.assert_called_once()
+
+    async def test_explicit_constraint_response_delete_and_idempotency(self):
+        await self.save_cookie()
+        await self.app.state.database.pause_account("default", "test")
+        body = {"product_url": fixtures.URL, "account_id": "default"}
+        headers = {**HEADERS, "Idempotency-Key": "explicit"}
+        created = await self.client.post(SKU, headers=headers, json=body)
+        self.assertEqual(created.status_code, 202)
+        task = created.json()
+        self.assertEqual((task["account_id"], task["requested_account_id"], task["status"]), ("", "default", "queued"))
+        summary = (await self.client.get(QUEUE + "/tasks", headers=HEADERS)).json()["tasks"][0]
+        self.assertEqual((summary["account_id"], summary["requested_account_id"]), ("", "default"))
+        await self.app.state.database.delete_account("default")
+        replay = await self.client.post(SKU, headers=headers, json=body)
+        self.assertEqual(replay.json()["task_id"], task["task_id"])
+        self.assertEqual(replay.json()["error"]["code"], "ACCOUNT_UNAVAILABLE")
+        missing = await self.client.post(SKU, headers=HEADERS, json=body)
+        self.assertEqual(missing.status_code, 503)
+        self.assertEqual(missing.json()["detail"]["code"], "ACCOUNT_UNAVAILABLE")
+        self.fake.fetch.assert_not_called()
 
     async def test_running_cancel_keeps_capacity_until_actual_return(self):
         await self.save_cookie()

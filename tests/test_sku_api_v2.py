@@ -90,8 +90,19 @@ class ProductSkuApiV2Tests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(fixtures.SECRET, response.text)
 
     async def test_real_service_missing_cookie_and_single_fetch(self):
-        self.assertEqual((await self.post()).status_code, 503)
+        pending = asyncio.create_task(self.post())
+        async def wait_queued():
+            while True:
+                queued = await self.app.state.database.list_queue_tasks(("queued",))
+                if queued:
+                    return queued
+                await asyncio.sleep(0.005)
+        queued = await asyncio.wait_for(wait_queued(), 3)
+        self.assertFalse(pending.done())
         self.factory.assert_not_called()
+        self.assertEqual(len(queued), 1)
+        await self.app.state.database.cancel_queue_task(queued[0]["task_id"])
+        self.assertEqual((await pending).status_code, 409)
         await self.save_cookie()
         response = await self.post()
         self.assertEqual(response.status_code, 200)

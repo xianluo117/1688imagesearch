@@ -89,6 +89,7 @@ let taskRows = [];
 let pageIndex = 0;
 let pageCount = 1;
 let refreshing = false;
+let refreshAgain = false;
 let automatic = true;
 const pageSize = 25;
 const selected = new Set();
@@ -116,7 +117,7 @@ function renderTaskStatus(task) {
     : [task.error_code, task.error_message].filter(Boolean).join(': ');
   const currentError = !succeeded && (task.status === 'failed' || Boolean(error));
   const label = succeeded && historicalFailure ? '重试后成功' :
-    task.status === 'queued' && !task.account_id ? '等待账号' : labels[task.status] || task.status;
+    task.status === 'queued' && !task.account_id ? (task.requested_account_id ? '指定账号待执行' : '待分配账号') : labels[task.status] || task.status;
   const detailLabel = currentError ? '错误详情' : historicalFailure ? '历史失败详情' : '';
   return `<span class="badge ${text(task.status)}">${text(label)}</span>` +
     (currentError && error ? `<div class="task-error">${text(error)}</div>` : '') +
@@ -160,7 +161,7 @@ function renderTasks() {
   $('tasks').innerHTML = rows.length ? rows.map(task => `<tr>
     <td><input class="task-check" aria-label="选择任务 ${text(task.task_id)}" type="checkbox" value="${text(task.task_id)}" ${cancellable(task) ? '' : 'disabled'} ${selected.has(task.task_id) ? 'checked' : ''}></td><td>${text(task.seq)}</td><td>${text(kindLabels[task.kind] || task.kind)}</td>
     <td>${renderTaskStatus(task)}</td>
-    <td title="${text(task.task_id)}"><button class="error-detail secondary" data-id="${text(task.task_id)}">${text(task.task_id.slice(0, 8))}…</button><br>${text(task.account_id || '待分配账号')} · 第 ${text(task.attempt_count)} 次
+    <td title="${text(task.task_id)}"><button class="error-detail secondary" data-id="${text(task.task_id)}">${text(task.task_id.slice(0, 8))}…</button><br>${text(task.account_id || (task.requested_account_id ? `请求账号：${task.requested_account_id}（未执行）` : '待分配账号'))} · 第 ${text(task.attempt_count)} 次
     ${renderAttempts(task)}</td><td>${task.dependency_id ? text(task.dependency_id.slice(0, 8)) + '…' : '-'}</td>
     <td>${text(time(task.created_at))}</td><td>${text(time(task.started_at))}</td><td>${task.cancel_requested ? '已请求' : '—'}</td></tr>`).join('') : '<tr><td colspan="9" class="empty">暂无匹配任务<br><span class="subtle">调整筛选条件，或等待新任务进入队列</span></td></tr>';
   syncSelection();
@@ -216,6 +217,46 @@ function renderAccounts(accounts) {
       productDetails.hidden = true;
       editor = { row, label, input, button, remove, status, testButton, testStatus, productButton, productInput, productStatus, productDetails, productTesting: false, productResult: null, dirty: false, testing: false, deleting: false, revision: 0 };
       const current = editor;
+      const periodicInput = document.createElement('input');
+      periodicInput.placeholder = '定期测试商品链接（独立保存）';
+      periodicInput.setAttribute('aria-label', `${account.display_name} 定期测试链接`);
+      const periodicSave = document.createElement('button');
+      periodicSave.textContent = '保存并启用定期测试';
+      const periodicStop = document.createElement('button');
+      periodicStop.textContent = '停止定期测试';
+      periodicStop.className = 'secondary';
+      const periodicStatus = document.createElement('span');
+      periodicStatus.setAttribute('role', 'status');
+      Object.assign(current, { periodicInput, periodicSave, periodicStop, periodicStatus,
+        periodicDirty: false, periodicSaving: false, periodicEnabled: false });
+      periodicInput.oninput = () => { current.periodicDirty = true; };
+      const savePeriodic = async enabled => {
+        const value = periodicInput.value.trim();
+        current.periodicSaving = true;
+        periodicSave.disabled = periodicStop.disabled = true;
+        periodicStatus.textContent = '保存中…';
+        try {
+          const response = await fetch(`/api/v1/accounts/${encodeURIComponent(account.account_id)}/periodic-test`, {
+            method: 'PUT', headers: { ...headers(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(enabled ? { enabled, product_url: value } : { enabled }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `保存失败（${response.status}）`);
+          current.periodicEnabled = Boolean(result.periodic_test_enabled);
+          if (enabled && periodicInput.value.trim() === value) {
+            periodicInput.value = result.periodic_test_url;
+            current.periodicDirty = false;
+          }
+          periodicStatus.textContent = enabled ? '已保存并启用' : '已停止';
+        } catch (error) { periodicStatus.textContent = error.message; }
+        finally {
+          current.periodicSaving = false;
+          periodicSave.disabled = current.deleting;
+          periodicStop.disabled = current.deleting || !current.periodicEnabled;
+        }
+      };
+      periodicSave.onclick = () => savePeriodic(true);
+      periodicStop.onclick = () => savePeriodic(false);
       productDetails.onclick = () => {
         $('detailsTitle').textContent = `产品测试（独立诊断） · ${account.display_name}`;
         $('errorDetails').textContent = JSON.stringify(current.productResult, null, 2);
@@ -234,7 +275,8 @@ function renderAccounts(accounts) {
           });
           const result = await response.json();
           current.productResult = result;
-          productStatus.textContent = `${response.ok && result.success ? '产品测试成功' : '产品测试失败'} · ${result.elapsed_ms ?? Math.round(performance.now() - started)} ms`;
+          productStatus.textContent = `${response.ok && result.success ? '产品测试成功' : '产品测试失败'}${result.account_recovered ? ' · 账号已恢复正常' : ''} · ${result.elapsed_ms ?? Math.round(performance.now() - started)} ms`;
+          if (response.ok && result.success) await refresh(true);
         } catch (error) {
           current.productResult = { kind: 'account_product_test', account_id: account.account_id, error: { message: error.message, stack: error.stack } };
           productStatus.textContent = `产品测试失败 · ${Math.round(performance.now() - started)} ms`;
@@ -285,12 +327,23 @@ function renderAccounts(accounts) {
         } catch (error) { status.textContent = error.message; }
         finally { button.disabled = false; }
       };
-      row.append(label, input, button, testButton, remove, status, testStatus, productInput, productButton, productStatus, productDetails);
+      row.append(label, input, button, testButton, remove, status, testStatus, productInput, productButton, productStatus, productDetails,
+        periodicInput, periodicSave, periodicStop, periodicStatus);
       $('accounts').append(row);
       accountEditors.set(account.account_id, editor);
     }
     editor.label.textContent = `${account.display_name}: ${accountLabels[account.state] || account.state}${account.reason ? ' / ' + account.reason : ''}`;
     editor.deleting = account.state === 'deleting';
+    editor.periodicInput.disabled = editor.deleting;
+    if (!editor.periodicSaving) {
+      editor.periodicEnabled = Boolean(account.periodic_test_enabled);
+      editor.periodicSave.disabled = editor.deleting;
+      editor.periodicStop.disabled = editor.deleting || !editor.periodicEnabled;
+      if (!editor.periodicDirty) editor.periodicInput.value = account.periodic_test_url || '';
+      editor.periodicStatus.textContent = editor.periodicEnabled
+        ? (account.state === 'paused' ? '定期测试已启用 · 暂停期间每30秒探测' : '定期测试已启用 · 等待账号暂停')
+        : '定期测试已停止';
+    }
     editor.testButton.disabled = editor.testing || editor.deleting;
     editor.productButton.disabled = editor.productTesting || editor.deleting;
     editor.productInput.disabled = editor.deleting;
@@ -305,8 +358,12 @@ function renderAccounts(accounts) {
     }
   }
 }
-async function refresh() {
-  if (!$('apiKey').value.trim() || refreshing) return;
+async function refresh(afterProductTest = false) {
+  if (!$('apiKey').value.trim()) return;
+  if (refreshing) {
+    if (afterProductTest === true) refreshAgain = true;
+    return;
+  }
   refreshing = true;
   $('refresh').disabled = true;
   try {
@@ -322,7 +379,11 @@ async function refresh() {
       showError('');
     } else showError(`任务已更新，但账号查询失败（${accountsResponse.status}）`);
   } catch (error) { showError(error.message); }
-  finally { refreshing = false; $('refresh').disabled = false; }
+  finally {
+    refreshing = false;
+    $('refresh').disabled = false;
+    if (refreshAgain) { refreshAgain = false; await refresh(); }
+  }
 }
 $('saveKey').onclick = () => { sessionStorage.setItem('queue-api-key', $('apiKey').value.trim()); sessionStorage.setItem('console-api-key', $('apiKey').value.trim()); refresh(); };
 $('refresh').onclick = refresh;

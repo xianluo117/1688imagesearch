@@ -131,7 +131,14 @@ class QueueStoreMixin(SchedulerStoreMixin):
             if (await c.fetchone())[0] >= limit:
                 return None, "QUEUE_FULL"
             now, task_id = time.time(), str(uuid.uuid4())
-            if kind != "product":
+            if kind == "sku":
+                if account_id is not None:
+                    c = await db.execute("SELECT 1 FROM accounts WHERE account_id=? AND state<>'deleting'", (account_id,))
+                    if await c.fetchone() is None:
+                        return None, "ACCOUNT_UNAVAILABLE"
+                payload = {**payload, "late_account_assignment": True, "requested_account_id": account_id}
+                account_id = ""
+            elif kind != "product":
                 selected = await self._select_account_in_transaction(db, account_id)
                 if selected is None:
                     return None, "ACCOUNT_UNAVAILABLE"
@@ -201,23 +208,36 @@ class QueueStoreMixin(SchedulerStoreMixin):
             c = await db.execute("""
                 SELECT q.* FROM queue_tasks q
                 WHERE q.status='queued' AND q.cancel_requested=0 AND (? IS NULL OR q.kind=?)
-                  AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id=q.account_id AND a.enabled=1
-                      AND (a.state='normal' OR (a.state='cooldown' AND a.until<=?)))
-                  AND (? IS NULL OR (SELECT COUNT(*) FROM queue_tasks r
-                      WHERE r.status='running' AND r.account_id=q.account_id) < ?)
+                  AND ((q.kind='sku' AND q.account_id=''
+                        AND json_extract(q.payload_json, '$.late_account_assignment')=1)
+                    OR (EXISTS (SELECT 1 FROM accounts a WHERE a.account_id=q.account_id AND a.enabled=1
+                       AND (a.state='normal' OR (a.state='cooldown' AND a.until<=?)))
+                    AND (? IS NULL OR (SELECT COUNT(*) FROM queue_tasks r
+                      WHERE r.status='running' AND r.account_id=q.account_id) < ?)))
                   AND (q.dependency_id IS NULL OR EXISTS (
                       SELECT 1 FROM queue_tasks p WHERE p.task_id=q.dependency_id AND p.status='succeeded'))
-                ORDER BY q.seq LIMIT 1
+                ORDER BY q.seq
             """, (kind, kind, now, max_account_running, max_account_running))
-            row = await c.fetchone()
+            row = None
+            for candidate in await c.fetchall():
+                payload = json.loads(candidate["payload_json"])
+                if candidate["kind"] == "sku" and not candidate["account_id"] and payload.get("late_account_assignment"):
+                    selected = await self._select_account_in_transaction(
+                        db, payload.get("requested_account_id"),
+                        exclude=payload.get("retry_exclude_account_id"),
+                        max_running=max_account_running, prefer_idle=True,
+                    )
+                    if selected is None:
+                        continue
+                    account_id, version = selected
+                    payload["cookie_version"] = version
+                    await db.execute("UPDATE queue_tasks SET account_id=?, payload_json=? WHERE task_id=?",
+                                     (account_id, encode(payload), candidate["task_id"]))
+                row = candidate
+                break
             if row is None:
                 await db.commit()
                 return None
-            if max_account_running is not None:
-                c = await db.execute("SELECT COUNT(*) FROM queue_tasks WHERE status='running' AND account_id=?", (row["account_id"],))
-                if (await c.fetchone())[0] >= max_account_running:
-                    await db.commit()
-                    return None
             task_id = row["task_id"]
             if row["kind"] == "upload":
                 await db.execute("""
@@ -321,10 +341,18 @@ class QueueStoreMixin(SchedulerStoreMixin):
             """, (task_id, attempt, row["account_id"], payload.get("cookie_version"), status,
                   error_code, error_message, encode(result) if result is not None else None,
                   encode(error_details) if error_details is not None else None))
-            if status == "failed" and attempt == 1 and self.accepting and error_code != "SCHEDULER_STOPPING":
-                selected = await self._select_account_in_transaction(db, exclude=row["account_id"])
+            late_sku = row["kind"] == "sku" and payload.get("late_account_assignment")
+            if (status == "failed" and attempt == 1 and self.accepting
+                    and error_code != "SCHEDULER_STOPPING"
+                    and not (late_sku and payload.get("requested_account_id") is not None)):
+                selected = await self._select_account_in_transaction(
+                    db, exclude=row["account_id"], select=not late_sku,
+                )
                 if selected is not None:
                     account_id, version = selected
+                    if late_sku:
+                        payload["retry_exclude_account_id"] = row["account_id"]
+                        account_id, version = "", None
                     payload.update(attempt=2, cookie_version=version)
                     if row["kind"] == "product":
                         payload["reupload_required"] = True

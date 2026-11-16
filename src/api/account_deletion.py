@@ -59,6 +59,21 @@ class AccountDeletionMixin:
             AND (q.account_id='' OR EXISTS (SELECT 1 FROM accounts a
                 WHERE a.account_id=q.account_id AND a.state='deleting')) ORDER BY q.seq""")
         for row in rows:
+            payload = json.loads(row["payload_json"])
+            if row["kind"] == "sku" and payload.get("late_account_assignment"):
+                requested = payload.get("requested_account_id")
+                if requested is not None:
+                    cursor = await db.execute("SELECT 1 FROM accounts WHERE account_id=? AND state<>'deleting'", (requested,))
+                    if await cursor.fetchone() is None:
+                        now = time.time()
+                        await db.execute("""UPDATE queue_tasks SET status='failed',
+                            error_code='ACCOUNT_UNAVAILABLE', error_message='指定账号已删除或不可用',
+                            finished_at=?, updated_at=? WHERE task_id=?""", (now, now, row["task_id"]))
+                        continue
+                # Public SKU tasks are assigned only by the atomic claim transaction.
+                if row["account_id"]:
+                    await self._bind_waiting_task(db, row, None)
+                continue
             await self._bind_waiting_task(db, row, await self._select_account_in_transaction(db))
 
     async def _finalize_deletions(self, db):

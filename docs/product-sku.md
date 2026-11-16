@@ -159,7 +159,13 @@ Invoke-RestMethod -Method Post `
 
 同步入口先入队，等待期内取得分类结果时直接返回 [`ProductSkuResponse`](../src/api/sku_schemas.py:15)，不包任务对象。包含商品ID、规范链接、来源、状态、原因、主图、SKU数组、SKU数量、警告和完整性；HTTP映射见[共享策略](../src/api/sku_http.py:9)。等待超时504返回 [`task_id / query_url`](../src/api/sku_service.py:32) 和响应头 [`Location`](../src/api/sku_http.py:42)，后台继续，可查询原任务；断开不取消任务。
 
-异步提交使用 [`POST /api/v2/sku-tasks`](../src/api/queue_api.py:63)，轮询使用 [`GET /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:75)，取消使用 [`DELETE /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:81)。提交体仍仅含商品链接；鉴权仍用搜索密钥。任务结果统一为第二版业务结构，任务成功要求成功类业务状态且有效SKU非空。完整契约见 [`unified-queue.md`](unified-queue.md)。
+异步提交使用 [`POST /api/v2/sku-tasks`](../src/api/queue_api.py:145)，轮询使用 [`GET /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:157)，取消使用 [`DELETE /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:163)。提交商品链接，可选指定账号；鉴权仍用搜索密钥。任务结果统一为第二版业务结构，任务成功要求成功类业务状态且有效SKU非空。完整契约见 [`unified-queue.md`](unified-queue.md)。
+
+新 SKU 在领取时分配账号和最新有效 Cookie。无可用账号也可入队，容量及同步等待超时不变；优先执行最早可执行任务，优先选择运行数较少的账号，同负载轮转。指定账号忙、暂停或无 Cookie 时等待，不阻塞其他可执行任务；不存在或已删除时返回明确的账号不可用错误。
+
+任务响应中的 [`account_id`](../src/api/queue_api.py:29) 仅表示实际绑定的执行账号，未分配时为空字符串；[`requested_account_id`](../src/api/queue_api.py:30) 单独表示请求约束，无指定时为空。历史尝试保留真实执行账号，列表仍按创建时间倒序。幂等参数包含请求指定账号，不包含动态 Cookie。
+
+公共 SKU 保留原首次失败跨账号重试资格、失败类别和最多一次限制；失败时有其他可用账号才重试，领取时再分配并排除首账号，保留原队列顺序。指定 SKU 不自动重试。禁止风控跨账号重试及重试排队尾的独立政策本轮未实施；旧任务和图片链路不变。
 
 | HTTP | 场景 | 响应处理 |
 |---|---|---|
@@ -169,9 +175,10 @@ Invoke-RestMethod -Method Post `
 | 422 | 非法链接、缺少字段、类型错误、额外字段 | 修正请求；不发起详情请求 |
 | 409 | 幂等键冲突或任务取消 | [`IDEMPOTENCY_CONFLICT / TASK_CANCELLED`](../src/api/sku_service.py:51)；更正提交或按需创建新任务 |
 | 429 | 共享队列容量已满 | [`QUEUE_FULL`](../src/api/sku_service.py:55)；退避后重试，并发占满但容量未满时正常排队 |
-| 502 | access_restricted、parse_failed、network_failed | 保留完整分类结果、原因及警告；风控不自动重试 |
+| 502 | access_restricted、parse_failed、network_failed | 保留完整分类结果、原因及警告；任务级重试规则见上文 |
 | 502 | 未预期异常或结果结构异常 | detail错误码 SKU_QUERY_FAILED；不回显异常原文 |
-| 503 | 无激活Cookie、密文损坏、无适用Cookie | detail错误码 COOKIE_UNAVAILABLE；由管理员检查已有会话 |
+| 503 | 执行时Cookie无法加载或解密 | detail错误码 COOKIE_UNAVAILABLE；无可用账号的新公共任务会先排队 |
+| 503 | 指定账号不存在、删除中或排队期间已删除 | detail错误码 ACCOUNT_UNAVAILABLE；不改用其他账号 |
 | 503 | login_required | 保留分类结果；服务器会话被上游要求登录，不是查询密钥错误 |
 | 503 | 服务关闭中 | detail错误码 SKU_SERVICE_STOPPING |
 | 504 | 同步等待或执行预算超时 | [`SKU_QUERY_TIMEOUT / TASK_TIMEOUT`](../src/api/sku_service.py:65)；前者后台继续，按响应查询位置获取原任务 |

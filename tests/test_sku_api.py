@@ -92,10 +92,14 @@ class ProductSkuApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["detail"]["code"], "INVALID_API_KEY")
         self.factory.assert_not_called()
 
-    async def test_missing_or_corrupt_cookie_is_safe_503(self):
-        response = await self.post()
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"]["code"], "ACCOUNT_UNAVAILABLE")
+    async def test_missing_cookie_queues_and_corrupt_cookie_is_safe_503(self):
+        with patch.object(self.app.state.sku_service, "settings", replace(self.settings, sku_query_timeout_seconds=0.05)):
+            response = await self.post()
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json()["detail"]["code"], "SKU_QUERY_TIMEOUT")
+        task_id = response.json()["detail"]["task_id"]
+        self.assertEqual((await self.app.state.database.get_queue_task(task_id)).status, "queued")
+        await self.app.state.database.cancel_queue_task(task_id)
         await self.save_cookie()
         with patch.object(self.app.state.cookie_store, "load_version", AsyncMock(
             side_effect=CookieStoreError(SECRET),

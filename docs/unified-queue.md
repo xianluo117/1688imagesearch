@@ -54,13 +54,19 @@ API 的图片上传、图搜商品查询、SKU 查询共用一个 SQLite 持久�
 | 查询 | [`GET /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:75) | HTTP 200、任务对象；不存在、类型不符或已清理为 404 |
 | 取消 | [`DELETE /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:81) | 当前任务对象；执行中取消不保证立即进入终态 |
 
-提交体仅含 [`product_url`](../src/api/sku_schemas.py:12)，与同步接口相同。无需先图搜。建议每 1～2 秒查询一次任务，终态停止轮询。
+提交体包含 [`product_url`](../src/api/sku_schemas.py:12)，可选 [`account_id`](../src/api/sku_schemas.py:13)，与同步接口相同。无需先图搜。建议每 1～2 秒查询一次任务，终态停止轮询。
+
+新 SKU 提交时不绑定账号和 Cookie，无账号也可在容量内排队。领取最早可执行任务时，优先选择运行数较少的可用账号，同负载轮转，并绑定最新 Cookie。指定账号不可用则等待，不阻塞后续可执行任务；指定账号不存在或删除后明确报账号不可用，不自动换人。全局及账号请求间隔不变。
+
+公共 SKU 仍仅允许原有首次失败换号重试，失败时须存在其他可用账号；重试领取时才分配、排除首次账号、保留队列顺序。指定 SKU 不自动重试。旧 SKU 与图片政策不变，未实施风控禁止换号或重试队尾。
 
 任务对象定义见 [`SkuTaskResponse`](../src/api/queue_api.py:24)：
 
 | 字段 | 读取方式 |
 |---|---|
 | [`task_id / query_url`](../src/api/queue_api.py:25) | 保存任务编号和轮询地址 |
+| [`account_id`](../src/api/queue_api.py:29) | 实际执行账号，待分配为空字符串 |
+| [`requested_account_id`](../src/api/queue_api.py:30) | 用户指定约束，无指定为空，不代表已执行 |
 | [`status / cancel_requested`](../src/api/queue_api.py:26) | 任务状态及取消请求标记 |
 | [`created_at / updated_at / started_at / finished_at`](../src/api/queue_api.py:28) | Unix 秒时间戳，开始及完成时间可为空 |
 | [`result`](../src/api/queue_api.py:33) | 可空的第二版 SKU 完整业务结果，HTTP 金额沿用向上取整展示 |
@@ -76,7 +82,7 @@ API 的图片上传、图搜商品查询、SKU 查询共用一个 SQLite 持久�
 | 409 | [`IDEMPOTENCY_CONFLICT`](../src/api/sku_service.py:51) | 更正键或参数，不盲目重试 |
 | 422 | [`INVALID_IDEMPOTENCY_KEY`](../src/api/sku_http.py:29) | 修正幂等请求头 |
 | 429 | [`QUEUE_FULL`](../src/api/sku_service.py:55) | 三类共享容量已满，退避后重试；不是单独 SKU 并发忙 |
-| 503 | [`COOKIE_UNAVAILABLE`](../src/api/sku_service.py:47) | 管理员检查活动 Cookie |
+| 503 | [`ACCOUNT_UNAVAILABLE`](../src/api/sku_service.py:53) | 指定账号不存在或删除中；无可用账号的公共 SKU 仍可入队 |
 | 503 | [`SKU_SERVICE_STOPPING`](../src/api/sku_service.py:43) | 停机中，不接纳新任务 |
 
 输入和鉴权错误仍沿用各接口原契约。

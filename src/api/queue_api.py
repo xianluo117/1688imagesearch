@@ -27,6 +27,7 @@ class SchedulerStatus(BaseModel):
 class SkuTaskResponse(BaseModel):
     task_id: str
     account_id: str
+    requested_account_id: str | None = None
     attempt_count: int
     attempts: list[dict]
     status: TaskStatus
@@ -57,6 +58,7 @@ async def queue_task_summary(task_id: str, database) -> dict | None:
         "seq": task.seq,
         "task_id": task.task_id,
         "account_id": task.account_id,
+        "requested_account_id": task.payload.get("requested_account_id"),
         "attempt_count": task.payload.get("attempt", 1),
         "attempts": [{key: value for key, value in attempt.items() if key != "result"}
                      for attempt in await database.list_task_attempts(task.task_id)],
@@ -81,6 +83,7 @@ async def sku_task_response(task, database) -> SkuTaskResponse:
     return SkuTaskResponse(
         task_id=task.task_id, status=task.status, cancel_requested=task.cancel_requested,
         account_id=task.account_id, attempt_count=task.payload.get("attempt", 1),
+        requested_account_id=task.payload.get("requested_account_id"),
         attempts=await database.list_task_attempts(task.task_id),
         created_at=task.created_at, updated_at=task.updated_at, started_at=task.started_at,
         finished_at=task.finished_at, query_url=task_location(task.task_id), result=result,

@@ -1,4 +1,4 @@
-"""Account-local SKU diagnostics, independent of scheduling and protection state."""
+"""Account-local SKU diagnostics with conditional recovery on manual success."""
 import asyncio
 from time import perf_counter
 
@@ -63,13 +63,23 @@ async def run_product_test(account_id: str, body: ProductTestRequest, request: R
     if account["state"] == "deleting":
         raise HTTPException(409, detail={"code": "ACCOUNT_DELETING", "message": "账号正在删除"})
 
+    result = await test_account_product(database, request.app.state.cookie_store, account, url)
+    result["account_recovered"] = (
+        await database.recover_product_test(account) if result["success"] else False
+    )
+    return result
+
+
+async def test_account_product(database, cookie_store, account, url):
+    """Shared diagnostic only: never mutate account protection or alert state."""
+    account_id = account["account_id"]
     started = perf_counter()
     control = DiagnosticRequestControl()
     result = {"kind": "account_product_test", "account_id": account_id,
               "product_url": url, "cookie_version": None, "success": False,
               "result": None, "error": None, "diagnostics": {"events": control.events}}
     try:
-        version, records = await request.app.state.cookie_store.load_active(account_id)
+        version, records = await cookie_store.load_active(account_id)
         result["cookie_version"] = version
         user_agent = await database.get_account_user_agent(account_id)
         raw = await asyncio.to_thread(

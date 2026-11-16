@@ -383,9 +383,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_account_risk_releases_slot_retries_elsewhere_and_keeps_versions(self):
         await self.db.store_cookie(b"b", cookie_count=1, exported_at=None, account_id="other")
-        task_id = await self.db.create_sku_task("risk", account_id="default")
-        bound = await self.db.get_queue_task(task_id)
+        task_id = await self.db.create_sku_task("risk")
         await self.db.store_cookie(b"updated", cookie_count=1, exported_at=None)
+        version = (await self.db.get_active_cookie("default"))[0]
         calls = []
 
         def fetch(url, records, control):
@@ -405,12 +405,14 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["default", "other"])
         attempts = await self.db.list_task_attempts(task_id)
         self.assertEqual([a["status"] for a in attempts], ["failed", "succeeded"])
-        self.assertEqual(attempts[0]["cookie_version"], bound.payload["cookie_version"])
+        self.assertEqual(attempts[0]["cookie_version"], version)
         self.assertEqual((await self.db.get_account_state("default"))["state"], "paused")
         self.assertEqual((await self.db.get_account_state("other"))["state"], "normal")
         self.assertEqual((await self.db.get_scheduler_state()).state, "normal")
         await self.db.pause_account("other", "risk")
-        self.assertIsNone(await self.db.create_sku_task("unavailable"))
+        waiting = await self.db.create_sku_task("unavailable")
+        self.assertIsNotNone(waiting)
+        self.assertEqual((await self.db.get_queue_task(waiting)).account_id, "")
         self.assertEqual(calls, ["default", "other"])
 
     async def test_product_retry_reuploads_without_changing_parent_or_sibling(self):
@@ -424,7 +426,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.db.get_queue_task(product)).account_id, "default")
         self.assertEqual((await self.db.get_queue_task(product)).payload["cookie_version"], original.cookie_version)
         # Product creation inherits its parent and must not consume automatic rotation.
-        next_id = await self.db.create_sku_task("rotation")
+        next_id = await self.db.create_upload_task("rotation")
         self.assertEqual((await self.db.get_queue_task(next_id)).account_id, "default")
         await self.db.cancel_queue_task(next_id)
         calls = []

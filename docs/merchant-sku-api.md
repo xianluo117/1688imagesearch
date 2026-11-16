@@ -394,7 +394,8 @@ HTTP状态映射以[共享HTTP策略](../src/api/sku_http.py:9)为准。
 | 422 | [`INVALID_IDEMPOTENCY_KEY`](../src/api/sku_http.py:29) | 幂等键为空白或超过255字符 |
 | 429 | [`QUEUE_FULL`](../src/api/sku_service.py:55) | 三类共享队列容量已满，退避后有限重试 |
 | 502 | SKU_QUERY_FAILED | 内部查询异常；服务不回显原始异常或页面 |
-| 503 | COOKIE_UNAVAILABLE | 服务没有可用活动Cookie或无法解密；由管理员处理 |
+| 503 | COOKIE_UNAVAILABLE | 执行时Cookie无法加载或解密；由管理员处理 |
+| 503 | ACCOUNT_UNAVAILABLE | 指定账号不存在、删除中或排队期间删除；不换账号 |
 | 503 | SKU_SERVICE_STOPPING | 服务停机中，稍后重试 |
 | 504 | [`SKU_QUERY_TIMEOUT`](../src/api/sku_service.py:65) | 同步等待到期，后台继续；按任务编号和查询位置轮询 |
 | 504 | [`TASK_TIMEOUT`](../src/api/sku_service.py:69) | 有效执行预算耗尽，不等于同步等待超时 |
@@ -426,6 +427,8 @@ HTTP状态映射以[共享HTTP策略](../src/api/sku_http.py:9)为准。
 7. 上游受限、登录失效及字段无法解析时不要无限重试。
 
 默认三类任务共享总并发1、容量100，SKU单次网络超时20秒、有效执行预算180秒、同步HTTP入队后等待90秒。默认最多一次网络重试、最多两次受限重定向。客户端与反向代理读取超时建议至少110秒，以接收服务端等待超时响应，不代表任务完成上限。配置与预算区别见 [`unified-queue.md`](unified-queue.md)。
+
+新 SKU 领取时才绑定执行账号及最新 Cookie，无可用账号也可在容量内排队，同步等待仍可能超时。可选指定账号；忙、暂停、禁用或无 Cookie 时等待，不借用其他账号，也不阻塞后续可执行任务。未领取时任务响应的 [`account_id`](../src/api/queue_api.py:29) 为空字符串，[`requested_account_id`](../src/api/queue_api.py:30) 单独表达指定约束。幂等参数不含动态 Cookie。公共任务保留原首次失败换号重试资格及原队列顺序，重试领取时分配并排除首账号；指定任务不自动重试。旧任务和图片策略不变，风控禁止换号、重试队尾政策未实施。
 
 ### 6.1 共享请求间隔与保护
 
