@@ -357,7 +357,7 @@ HTTP 200直接返回结果对象，不额外包装任务对象。以下全部标
 - [x] 商品1093480088308：25个SKU，原价、折扣价均未逐SKU给出，结果只有 `sku_price_missing`。
 - [x] 取价顺序改为：SKU原价 → SKU折扣价 → **商品统一价**（`tradeModel.minPrice` = `maxPrice` 时用该价，来源 `UNIFORM_SOURCE`，依据 `detail_html_offer_uniform_price`）。区间价/阶梯价（最低≠最高）仍不回填。
 - [x] [离线回归](../tests/test_sku_discount_prices.py)新增统一价与区间价两例，价格相关测试全部通过；`test_queue_scheduler` 的 8 个错误在改动前同样存在，与本改动无关。
-- [ ] 部署重启后，用1093480088308实测：该商品若为区间价/阶梯价，价格仍为空。
+- [x] 部署重启后实测 1093480088308：25个SKU全部为 35.00 CNY（统一价兜底），警告只剩 `sku_completeness_unknown`。
 
 ## 4. 商家字段的空值与安全规则
 
