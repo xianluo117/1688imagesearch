@@ -10,6 +10,8 @@ SOURCE = "result.data.mainPrice.fields.finalPriceModel.tradeWithoutPromotion.sku
 BASIS = "detail_html_sku_original_quote_without_promotion"
 DISCOUNT_SOURCE = "result.global.globalData.model.tradeModel.skuMap[].discountPrice"
 DISCOUNT_BASIS = "detail_html_sku_discount_quote"
+UNIFORM_SOURCE = "result.global.globalData.model.tradeModel.minPrice==maxPrice"
+UNIFORM_BASIS = "detail_html_offer_uniform_price"
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,12 @@ class SkuPrices:
         self.quote_present: set[str] = set()
         self.discount_present: set[str] = set()
         self.legacy_enabled = contract is not VERIFIED_CONTRACT
+        self.uniform: set[str | None] = set()
+
+    def add_uniform(self, low: Any, high: Any) -> None:
+        # 商品统一价：最低价 = 最高价时，作为缺价 SKU 的最后兜底（阶梯/区间价不用）。
+        low, high = decimal_price(low, self.contract), decimal_price(high, self.contract)
+        self.uniform.add(low if low is not None and low == high else None)
 
     def add(self, sku_id: str, row: dict) -> None:
         # Kept for compatibility with the old synthetic/test collector. The
@@ -96,6 +104,10 @@ class SkuPrices:
             if price is None and self.legacy_enabled and sku.sku_id not in self.quote_candidates:
                 values = self.candidates.get(sku.sku_id, {None})
                 price = next(iter(values)) if len(values) == 1 else None
+            if price is None and len(values) <= 1 and len(discount_values) <= 1 and len(self.uniform) == 1:
+                price = next(iter(self.uniform))
+                if price is not None:
+                    source, basis = UNIFORM_SOURCE, UNIFORM_BASIS
             if (len(values) > 1 or len(discount_values) > 1) and price is None:
                 warnings.add("conflicting_sku_price")
             elif price is None and (sku.sku_id in self.quote_present or sku.sku_id in self.discount_present):

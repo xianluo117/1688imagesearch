@@ -6,7 +6,7 @@ from test_sku_quote_sources import quoted
 from test_product_sku import PID, URL, page, trade_page
 from product_sku.parser import parse_detail
 from product_sku.price_diagnostics import inspect
-from product_sku.prices import DISCOUNT_SOURCE
+from product_sku.prices import DISCOUNT_SOURCE, UNIFORM_SOURCE
 from api.sku_schemas import ProductSkuResponse
 from api.sku_v2_converter import convert_result
 
@@ -86,8 +86,18 @@ class DiscountPriorityTests(unittest.TestCase):
         model["tradeModel"]["skuMap"].append(row)
         self.assertNotIn("9000", {s.sku_id for s in parse_detail(page(value), URL).skus})
 
-    def test_no_minimum_or_amount_fallback(self):
+    def test_uniform_price_fallback(self):
         value, model, _ = target_shape()
+        for row in model["tradeModel"]["skuMap"]:
+            del row["discountPrice"]
+        result = parse_detail(page(value), URL)
+        self.assertEqual({s.price for s in result.skus}, {"28.00"})
+        self.assertEqual({s.price_source for s in result.skus}, {UNIFORM_SOURCE})
+        self.assertNotIn("sku_price_missing", result.warnings)
+
+    def test_no_range_or_amount_fallback(self):
+        value, model, _ = target_shape()
+        model["tradeModel"].update(minPrice="28.00", maxPrice="32.00")
         for row in model["tradeModel"]["skuMap"]:
             del row["discountPrice"]
         self.assertTrue(all(s.price is None for s in parse_detail(page(value), URL).skus))

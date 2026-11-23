@@ -240,6 +240,8 @@ def _trade_skus(models: list[Any], product_id: str, images: OptionImages | None 
         props = _path(model, "offerDetail", "skuProps")
         if rows is None:
             continue
+        trade = _path(model, "tradeModel")
+        prices.add_uniform(trade.get("minPrice"), trade.get("maxPrice"))
         if not isinstance(rows, list) or not isinstance(props, list) or not 1 <= len(props) <= 32:
             warnings.add("invalid_trade_schema")
             continue
