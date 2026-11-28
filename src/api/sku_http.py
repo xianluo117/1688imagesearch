@@ -30,7 +30,7 @@ def idempotency_key(request: Request) -> str | None:
     return key
 
 
-async def query_result(product_url: str, request: Request) -> SkuResult:
+async def query_result(product_url: str, request: Request, sku_client: str | None = None) -> SkuResult:
     canonical = canonical_url(product_url)
     key = idempotency_key(request)
     try:
@@ -39,6 +39,8 @@ async def query_result(product_url: str, request: Request) -> SkuResult:
         kwargs = {"idempotency_key": key} if key is not None else {}
         if account_id:
             kwargs["account_id"] = account_id
+        if sku_client is not None:
+            kwargs["sku_client"] = sku_client
         return await service.query(canonical, **kwargs)
     except SkuServiceError as exc:
         raise HTTPException(

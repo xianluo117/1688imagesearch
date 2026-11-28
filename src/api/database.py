@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from .account_deletion import AccountDeletionMixin, AccountDeletingError, migrat
 from .queue_schema import initialize_queue
 from .queue_store import QueueStoreMixin
 from .settings_store import SettingsStoreMixin, initialize_settings
+from .sku_keys import SkuPolicy
 
 TaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
@@ -56,12 +58,16 @@ class ProductTaskRecord:
 
 
 class Database(QueueStoreMixin, AccountStoreMixin, AccountDeletionMixin, AlertStoreMixin, SettingsStoreMixin):
-    def __init__(self, path: str | Path, *, queue_capacity: int = 100) -> None:
+    def __init__(self, path: str | Path, *, queue_capacity: int = 100,
+                 sku_policies: dict[str, SkuPolicy] | None = None) -> None:
         if queue_capacity < 1:
             raise ValueError("queue_capacity must be positive")
         self.path = Path(path)
         self.queue_capacity = queue_capacity
         self.accepting = True
+        self._sku_policies = sku_policies or {"default": SkuPolicy()}
+        self._sku_scores: dict[int, dict[str, int]] = {}
+        self._claim_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, Header, Request, Response
 
 from .auth import require_api_key
+from .sku_auth import authorize_sku
 from .sku_http import RESULT_HTTP_STATUS, query_failed, query_result
 from .sku_schemas import ProductSkuRequest, ProductSkuResponse
 
@@ -18,7 +19,6 @@ async def _authorize(
 @router.post(
     "/api/v1/product-skus",
     response_model=ProductSkuResponse,
-    dependencies=[Depends(_authorize)],
     responses={
         401: {"description": "查询密钥无效"},
         422: {"description": "请求或详情链接无效"},
@@ -30,8 +30,9 @@ async def _authorize(
 )
 async def query_product_skus(
     body: ProductSkuRequest, request: Request, response: Response,
+    sku_client: str | None = Depends(authorize_sku),
 ) -> ProductSkuResponse:
-    result = await query_result(body.product_url, request)
+    result = await query_result(body.product_url, request, sku_client)
     try:
         payload = ProductSkuResponse.model_validate(result.to_dict())
     except Exception:

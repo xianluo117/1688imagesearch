@@ -90,7 +90,10 @@ class QueueStoreMixin(SchedulerStoreMixin):
     async def _enqueue(
         self, kind: TaskKind, payload: dict[str, Any], *,
         max_active: int | None, idempotency_key: str | None, account_id: str | None = None,
+        sku_client: str | None = None,
     ) -> tuple[str | None, str | None]:
+        if kind == "sku" and sku_client is not None:
+            payload = {**payload, "sku_client": sku_client}
         canonical = encode({**payload, "account_id": account_id} if account_id is not None else payload)
         limit = self.queue_capacity if max_active is None else min(self.queue_capacity, max_active)
         if limit < 1:
@@ -184,13 +187,65 @@ class QueueStoreMixin(SchedulerStoreMixin):
         """Atomically claim the first ready task under global and per-account limits."""
         return await self._claim_queue_task(max_running=max_running, max_account_running=max_account_running)
 
+    async def _pick_queue_task(self, db, candidates, max_account_running):
+        first = None
+        heads = {}
+        ready_accounts = {}
+        for row in candidates:
+            if row["kind"] != "sku":
+                if first is None:
+                    return row, None, None
+                continue
+            payload = json.loads(row["payload_json"])
+            if not row["account_id"] and payload.get("late_account_assignment"):
+                constraints = (payload.get("requested_account_id"), payload.get("retry_exclude_account_id"))
+                if constraints not in ready_accounts:
+                    ready_accounts[constraints] = await self._select_account_in_transaction(
+                        db, constraints[0], exclude=constraints[1], max_running=max_account_running,
+                        prefer_idle=True, select=False,
+                    )
+                if ready_accounts[constraints] is None:
+                    continue
+            if len(self._sku_policies) == 1:
+                return row, payload, None
+            if first is None:
+                first = (row, payload)
+            client = payload.get("sku_client", "default")
+            if client not in self._sku_policies:
+                client = "default"
+            if client not in heads or row["seq"] < heads[client][0]["seq"]:
+                heads[client] = (row, payload)
+        if first is None:
+            return None, None, None
+
+        priority = max(self._sku_policies[client].priority for client in heads)
+        weights = {client: self._sku_policies[client].weight for client in heads
+                   if self._sku_policies[client].priority == priority}
+        previous = self._sku_scores.get(priority, {})
+        scores = {client: previous.get(client, 0) + weight for client, weight in weights.items()}
+        winner = max(scores, key=lambda client: (scores[client], -heads[client][0]["seq"]))
+        scores[winner] -= sum(weights.values())
+        if len(scores) == 1:
+            scores[winner] = 0
+        row, payload = heads[winner]
+        oldest, oldest_payload = first
+        if row["seq"] != oldest["seq"]:
+            # Exchange SKU positions, not image positions. This gives the high
+            # priority SKU the current SKU turn without repeatedly delaying images.
+            oldest_payload["sku_dispatch_seq"] = payload.get("sku_dispatch_seq", row["seq"])
+            payload["sku_dispatch_seq"] = oldest["dispatch_seq"]
+            await db.executemany("UPDATE queue_tasks SET payload_json=? WHERE task_id=?", (
+                (encode(oldest_payload), oldest["task_id"]), (encode(payload), row["task_id"]),
+            ))
+        return row, payload, (priority, scores)
+
     async def _claim_queue_task(
         self, *, max_running: int | None, kind: TaskKind | None = None,
         max_account_running: int | None = None,
     ) -> QueueTaskRecord | None:
         if max_running is not None and max_running < 1:
             raise ValueError("max_running must be positive")
-        async with self._queue_connection() as db:
+        async with self._claim_lock, self._queue_connection() as db:
             await db.execute("BEGIN IMMEDIATE")
             if not self.accepting:
                 return None
@@ -206,7 +261,8 @@ class QueueStoreMixin(SchedulerStoreMixin):
                 await db.commit()
                 return None
             c = await db.execute("""
-                SELECT q.* FROM queue_tasks q
+                SELECT q.*, COALESCE(json_extract(q.payload_json, '$.sku_dispatch_seq'), q.seq) AS dispatch_seq
+                FROM queue_tasks q
                 WHERE q.status='queued' AND q.cancel_requested=0 AND (? IS NULL OR q.kind=?)
                   AND ((q.kind='sku' AND q.account_id=''
                         AND json_extract(q.payload_json, '$.late_account_assignment')=1)
@@ -216,29 +272,21 @@ class QueueStoreMixin(SchedulerStoreMixin):
                       WHERE r.status='running' AND r.account_id=q.account_id) < ?)))
                   AND (q.dependency_id IS NULL OR EXISTS (
                       SELECT 1 FROM queue_tasks p WHERE p.task_id=q.dependency_id AND p.status='succeeded'))
-                ORDER BY q.seq
+                ORDER BY dispatch_seq
             """, (kind, kind, now, max_account_running, max_account_running))
-            row = None
-            for candidate in await c.fetchall():
-                payload = json.loads(candidate["payload_json"])
-                if candidate["kind"] == "sku" and not candidate["account_id"] and payload.get("late_account_assignment"):
-                    selected = await self._select_account_in_transaction(
-                        db, payload.get("requested_account_id"),
-                        exclude=payload.get("retry_exclude_account_id"),
-                        max_running=max_account_running, prefer_idle=True,
-                    )
-                    if selected is None:
-                        continue
-                    account_id, version = selected
-                    payload["cookie_version"] = version
-                    await db.execute("UPDATE queue_tasks SET account_id=?, payload_json=? WHERE task_id=?",
-                                     (account_id, encode(payload), candidate["task_id"]))
-                row = candidate
-                break
+            row, payload, scores = await self._pick_queue_task(db, await c.fetchall(), max_account_running)
             if row is None:
                 await db.commit()
                 return None
             task_id = row["task_id"]
+            if row["kind"] == "sku" and not row["account_id"] and payload.get("late_account_assignment"):
+                account_id, version = await self._select_account_in_transaction(
+                    db, payload.get("requested_account_id"), exclude=payload.get("retry_exclude_account_id"),
+                    max_running=max_account_running, prefer_idle=True,
+                )
+                payload["cookie_version"] = version
+                await db.execute("UPDATE queue_tasks SET account_id=?, payload_json=? WHERE task_id=?",
+                                 (account_id, encode(payload), task_id))
             if row["kind"] == "upload":
                 await db.execute("""
                     UPDATE upload_tasks SET status='running', started_at=?, updated_at=?
@@ -259,6 +307,9 @@ class QueueStoreMixin(SchedulerStoreMixin):
                 await db.rollback()
                 return None
             await db.commit()
+            if scores is not None:
+                priority, updated_scores = scores
+                self._sku_scores[priority] = updated_scores
             return claimed
 
     async def cancel_queue_task(self, task_id: str) -> QueueTaskRecord | None:

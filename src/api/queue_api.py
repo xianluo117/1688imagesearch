@@ -7,13 +7,15 @@ from pydantic import BaseModel, Field
 from .schemas import TaskStatus
 from .proxy_test import test_proxy
 from .sku import _authorize
+from .sku_auth import authorize_sku
 from .sku_http import canonical_url, idempotency_key, query_failed
 from .sku_schemas import ProductSkuRequest
 from .sku_service import SkuServiceError, restore_result, task_location
 from .sku_v2_converter import convert_result
 from .sku_v2_schemas import ProductSkuResponseV2
 
-router = APIRouter(dependencies=[Depends(_authorize)])
+router = APIRouter()
+operator_router = APIRouter(dependencies=[Depends(_authorize)])
 
 
 class SchedulerStatus(BaseModel):
@@ -92,21 +94,21 @@ async def sku_task_response(task, database) -> SkuTaskResponse:
     )
 
 
-async def get_sku_task(database, task_id):
+async def get_sku_task(database, task_id, sku_client=None):
     task = await database.get_queue_task(task_id)
-    if task is None or task.kind != "sku":
+    if task is None or task.kind != "sku" or (sku_client is not None and task.payload.get("sku_client") != sku_client):
         raise HTTPException(404, detail={"code": "SKU_TASK_NOT_FOUND", "message": "SKU 任务不存在"})
     return task
 
 
-@router.get("/api/v1/accounts")
+@operator_router.get("/api/v1/accounts")
 async def list_accounts(request: Request):
     database = request.app.state.database
     accounts = await database.list_accounts()
     return {"accounts": [{**account, **await database.get_account_state(account["account_id"])} for account in accounts]}
 
 
-@router.delete("/api/v1/accounts/{account_id}")
+@operator_router.delete("/api/v1/accounts/{account_id}")
 async def delete_account(account_id: str, request: Request):
     result = await request.app.state.database.delete_account(account_id)
     if result is None:
@@ -123,7 +125,7 @@ class ProxyTestRequest(BaseModel):
     account_id: str | None = None
 
 
-@router.post("/api/v1/proxy-test")
+@operator_router.post("/api/v1/proxy-test")
 async def run_proxy_test(body: ProxyTestRequest, request: Request):
     proxy_url = body.proxy_url.strip()
     if proxy_url and not proxy_url.startswith(("http://", "socks5://", "socks5h://")):
@@ -132,7 +134,7 @@ async def run_proxy_test(body: ProxyTestRequest, request: Request):
     return await test_proxy(proxy_url, account_id=body.account_id, user_agent=user_agent)
 
 
-@router.put("/api/v1/accounts/{account_id}/proxy")
+@operator_router.put("/api/v1/accounts/{account_id}/proxy")
 async def save_account_proxy(account_id: str, body: AccountProxyRequest, request: Request):
     proxy_url = body.proxy_url.strip()
     if proxy_url and not proxy_url.startswith(("http://", "socks5://", "socks5h://")):
@@ -143,41 +145,44 @@ async def save_account_proxy(account_id: str, body: AccountProxyRequest, request
 
 
 @router.post("/api/v2/sku-tasks", response_model=SkuTaskResponse, status_code=202)
-async def create_sku_task(body: ProductSkuRequest, request: Request, response: Response):
+async def create_sku_task(body: ProductSkuRequest, request: Request, response: Response,
+                          sku_client: str | None = Depends(authorize_sku)):
     url, key = canonical_url(body.product_url), idempotency_key(request)
     try:
-        task_id = await request.app.state.sku_service.submit(url, idempotency_key=key, account_id=body.account_id)
+        task_id = await request.app.state.sku_service.submit(
+            url, idempotency_key=key, account_id=body.account_id, sku_client=sku_client,
+        )
     except SkuServiceError as exc:
         raise HTTPException(exc.status_code, detail=exc.detail()) from None
     response.headers["Location"] = task_location(task_id)
     database = request.app.state.database
-    return await sku_task_response(await get_sku_task(database, task_id), database)
+    return await sku_task_response(await get_sku_task(database, task_id, sku_client), database)
 
 
 @router.get("/api/v2/sku-tasks/{task_id}", response_model=SkuTaskResponse)
-async def query_sku_task(task_id: str, request: Request):
+async def query_sku_task(task_id: str, request: Request, sku_client: str | None = Depends(authorize_sku)):
     database = request.app.state.database
-    return await sku_task_response(await get_sku_task(database, task_id), database)
+    return await sku_task_response(await get_sku_task(database, task_id, sku_client), database)
 
 
 @router.delete("/api/v2/sku-tasks/{task_id}", response_model=SkuTaskResponse)
-async def cancel_sku_task(task_id: str, request: Request):
+async def cancel_sku_task(task_id: str, request: Request, sku_client: str | None = Depends(authorize_sku)):
     database = request.app.state.database
-    await get_sku_task(database, task_id)
+    await get_sku_task(database, task_id, sku_client)
     task = await database.cancel_queue_task(task_id)
     if task is None:
         raise HTTPException(404, detail={"code": "SKU_TASK_NOT_FOUND", "message": "SKU 任务不存在"})
     return await sku_task_response(task, database)
 
 
-@router.get("/api/v1/queue")
+@operator_router.get("/api/v1/queue")
 async def queue_status(request: Request):
     snapshot = await request.app.state.scheduler.snapshot()
     snapshot["global_workers"] = request.app.state.settings.global_worker_count
     return snapshot
 
 
-@router.get("/api/v1/queue/tasks")
+@operator_router.get("/api/v1/queue/tasks")
 async def queue_tasks(
     request: Request,
     status: Literal["active", "all"] = Query(default="active"),
@@ -188,7 +193,7 @@ async def queue_tasks(
     return {"tasks": [await queue_task_summary(task["task_id"], database) for task in tasks]}
 
 
-@router.get("/api/v1/queue/tasks/{task_id}/details")
+@operator_router.get("/api/v1/queue/tasks/{task_id}/details")
 async def task_error_details(task_id: str, request: Request):
     database = request.app.state.database
     task = await database.get_queue_task(task_id)
@@ -200,7 +205,7 @@ async def task_error_details(task_id: str, request: Request):
             "note": None if attempts else "历史任务未记录原始错误"}
 
 
-@router.post("/api/v1/queue/cancel")
+@operator_router.post("/api/v1/queue/cancel")
 async def cancel_queue_tasks(body: QueueCancelRequest, request: Request):
     database = request.app.state.database
     tasks = []
@@ -211,7 +216,10 @@ async def cancel_queue_tasks(body: QueueCancelRequest, request: Request):
     return {"tasks": tasks}
 
 
-@router.post("/api/v1/queue/resume")
+@operator_router.post("/api/v1/queue/resume")
 async def resume_queue(request: Request):
     await request.app.state.scheduler.resume()
     return await queue_status(request)
+
+
+router.include_router(operator_router)

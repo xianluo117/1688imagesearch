@@ -37,13 +37,14 @@ class ProductSkuService:
         self.cookie_store, self.settings, self.scheduler = cookie_store, settings, scheduler
         self.database = scheduler.database
 
-    async def submit(self, url: str, *, idempotency_key: str | None = None, account_id: str | None = None) -> str:
+    async def submit(self, url: str, *, idempotency_key: str | None = None,
+                     account_id: str | None = None, sku_client: str | None = None) -> str:
         if not self.database.accepting:
             raise SkuServiceError(503, "SKU_SERVICE_STOPPING", "SKU 服务正在停止")
         try:
             task_id, error = await self.database._enqueue(
                 "sku", {"product_url": url}, max_active=None,
-                idempotency_key=idempotency_key, account_id=account_id,
+                idempotency_key=idempotency_key, account_id=account_id, sku_client=sku_client,
             )
         except IdempotencyConflict:
             raise SkuServiceError(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同参数") from None
@@ -55,8 +56,9 @@ class ProductSkuService:
             raise SkuServiceError(429, "QUEUE_FULL", "任务队列已满")
         return task_id
 
-    async def query(self, url: str, *, idempotency_key: str | None = None, account_id: str | None = None) -> SkuResult:
-        task_id = await self.submit(url, idempotency_key=idempotency_key, account_id=account_id)
+    async def query(self, url: str, *, idempotency_key: str | None = None,
+                    account_id: str | None = None, sku_client: str | None = None) -> SkuResult:
+        task_id = await self.submit(url, idempotency_key=idempotency_key, account_id=account_id, sku_client=sku_client)
         try:
             task = await self.scheduler.wait_for_task(
                 task_id, timeout=self.settings.sku_query_timeout_seconds,

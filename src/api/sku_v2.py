@@ -1,7 +1,7 @@
 """V2 route: one shared query followed by a pure response conversion."""
 from fastapi import APIRouter, Depends, Request, Response
 
-from .sku import _authorize
+from .sku_auth import authorize_sku
 from .sku_http import RESULT_HTTP_STATUS, query_failed, query_result
 from .sku_schemas import ProductSkuRequest
 from .sku_v2_converter import convert_result
@@ -13,7 +13,6 @@ router = APIRouter()
 @router.post(
     "/api/v2/product-skus",
     response_model=ProductSkuResponseV2,
-    dependencies=[Depends(_authorize)],
     responses={
         401: {"description": "查询密钥无效；detail 错误"},
         422: {"description": "请求或详情链接无效；detail 错误"},
@@ -25,8 +24,9 @@ router = APIRouter()
 )
 async def query_product_skus_v2(
     body: ProductSkuRequest, request: Request, response: Response,
+    sku_client: str | None = Depends(authorize_sku),
 ) -> ProductSkuResponseV2:
-    result = await query_result(body.product_url, request)
+    result = await query_result(body.product_url, request, sku_client)
     try:
         payload = convert_result(result)
     except Exception:

@@ -7,6 +7,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from .sku_keys import SkuClientKey, SkuPolicy, parse_sku_keys
+
 
 class ConfigurationError(RuntimeError):
     pass
@@ -83,8 +85,20 @@ class Settings:
     request_interval_max_seconds: float = 4.0
     rate_limit_cooldown_seconds: float = 60.0
     sku_task_timeout_seconds: float = 180.0
+    default_sku_policy: SkuPolicy = SkuPolicy()
+    sku_client_keys: tuple[SkuClientKey, ...] = ()
+    console_cookie_upload: bool = False
+
+    @property
+    def sku_policies(self) -> dict[str, SkuPolicy]:
+        return {"default": self.default_sku_policy, **{client.name: client.policy for client in self.sku_client_keys}}
 
     def __post_init__(self) -> None:
+        secrets = {self.search_api_key, self.cookie_upload_api_key}
+        for client in self.sku_client_keys:
+            if client.secret in secrets:
+                raise ConfigurationError("SKU 专用 Key 必须互不相同，且不能与现有 API Key 重复")
+            secrets.add(client.secret)
         for name, upper in (("global_worker_count", 32), ("max_queued_tasks", 100000), ("account_max_concurrency", 32)):
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= upper:
@@ -127,7 +141,15 @@ class Settings:
                 "COOKIE_ENCRYPTION_KEY 必须是 Fernet.generate_key() 生成的 URL-safe Base64 密钥"
             ) from exc
 
+        try:
+            default_sku_policy, sku_client_keys = parse_sku_keys(os.getenv("SKU_API_KEYS", "").strip() or "{}")
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from None
+
         return cls(
+            default_sku_policy=default_sku_policy,
+            sku_client_keys=sku_client_keys,
+            console_cookie_upload=os.getenv("CONSOLE_COOKIE_UPLOAD", "0").strip() == "1",
             cookie_upload_api_key=_required_secret("COOKIE_UPLOAD_API_KEY"),
             search_api_key=_required_secret("SEARCH_API_KEY"),
             cookie_encryption_key=encryption_key,

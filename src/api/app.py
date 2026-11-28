@@ -29,6 +29,7 @@ from .worker import TaskCleanupService
 from .queue_scheduler import UnifiedQueueScheduler
 from .queue_store import IdempotencyConflict, QueueNotAccepting
 from .console_page import CONSOLE_PAGE
+from .console_cookie_cors import ConsoleCookieCors
 from .dingtalk import DingTalkNotifier
 from .queue_api import router as queue_router, scheduler_status
 from .queue_page import QUEUE_PAGE
@@ -100,7 +101,7 @@ def _raise_product_creation_error(code: str) -> None:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
-    database = Database(resolved.database_path)
+    database = Database(resolved.database_path, sku_policies=resolved.sku_policies)
     cookie_store = CookieStore(database, resolved.cookie_encryption_key)
     notifier = DingTalkNotifier(database)
     scheduler = UnifiedQueueScheduler(database, cookie_store, resolved)
@@ -130,6 +131,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.add_middleware(JsonCharsetMiddleware)
+    if resolved.console_cookie_upload:
+        app.add_middleware(ConsoleCookieCors)
     app.state.settings = resolved
     app.state.database = database
     app.state.cookie_store = cookie_store

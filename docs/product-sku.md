@@ -134,9 +134,17 @@ Cookie格式沿用[现有加载器](../src/image_search/cookies.py)：导出的�
 
 - 网站：https://1688imagesearch.xiaoc-ai.com
 - 请求：POST https://1688imagesearch.xiaoc-ai.com/api/v1/product-skus
-- 请求头：Content-Type 为 application/json；X-API-Key 为现有搜索密钥，对应服务器 SEARCH_API_KEY，不能使用Cookie上传密钥。
+- 请求头：Content-Type 为 application/json；X-API-Key 使用现有 `SEARCH_API_KEY` 或服务端配置的 SKU 专用 Key，不能使用 Cookie 上传密钥。
 - 只需提交字符串字段 [`product_url`](../src/api/sku_schemas.py:12)，不接受额外字段，不接收Cookie或图搜任务ID。
 - 每次查询读取服务器已激活Cookie版本，使用独立会话；不修改服务器Cookie记录，不把Cookie放进响应。已有Cookie可用时无需重新上传。
+
+### SKU Key 优先级与权重
+
+在服务端环境配置 `SKU_API_KEYS`，格式见 [环境变量示例](../.env.example#L3-L7)。`default` 为现有 `SEARCH_API_KEY` 的 SKU 策略，无需重复填写密钥；其他属性名为稳定的 Key 别名。专用 Key 须唯一，至少 24 位可见 ASCII 字符。修改后重启服务生效，已排队的 SKU 也适用新策略；如果删除了某个 Key，其已提交任务仍会执行，调度回退到默认策略。
+
+- **高优先级先走**：每次轮到 SKU 时，先选能执行任务的最高优先级。高优先级一直有任务时，低优先级可能一直等待。运行中的任务不被抢占。
+- **同级按权重混排**：例如 `vip` 和 `partner` 同为优先级 `10`，权重 `3:1`；两边持续都有可执行任务时，领取次数约为 `75%:25%`。空闲 Key 不占份额；同 Key 优先领取最早提交的可执行任务。重试再次领取也计一次。权重不改变共享容量、并发或账号限制，也不重排图搜和图片上传任务。
+- **专用 Key 仅用于 SKU**：支持两版同步查询、提交异步任务、查询和取消自己的任务。主 Key 保留原有权限。`Idempotency-Key` 仍为全局唯一；不同调用方使用同一幂等键返回 `409`，不会复用对方任务。
 
 ### 7.2 目标898728774563调用示例
 
@@ -159,9 +167,9 @@ Invoke-RestMethod -Method Post `
 
 同步入口先入队，等待期内取得分类结果时直接返回 [`ProductSkuResponse`](../src/api/sku_schemas.py:15)，不包任务对象。包含商品ID、规范链接、来源、状态、原因、主图、SKU数组、SKU数量、警告和完整性；HTTP映射见[共享策略](../src/api/sku_http.py:9)。等待超时504返回 [`task_id / query_url`](../src/api/sku_service.py:32) 和响应头 [`Location`](../src/api/sku_http.py:42)，后台继续，可查询原任务；断开不取消任务。
 
-异步提交使用 [`POST /api/v2/sku-tasks`](../src/api/queue_api.py:145)，轮询使用 [`GET /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:157)，取消使用 [`DELETE /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py:163)。提交商品链接，可选指定账号；鉴权仍用搜索密钥。任务结果统一为第二版业务结构，任务成功要求成功类业务状态且有效SKU非空。完整契约见 [`unified-queue.md`](unified-queue.md)。
+异步提交使用 [`POST /api/v2/sku-tasks`](../src/api/queue_api.py#L147)，轮询使用 [`GET /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py#L162)，取消使用 [`DELETE /api/v2/sku-tasks/{task_id}`](../src/api/queue_api.py#L168)。提交商品链接，可选指定账号；可使用搜索密钥或 SKU 专用 Key。任务结果统一为第二版业务结构，任务成功要求成功类业务状态且有效SKU非空。完整契约见 [`unified-queue.md`](unified-queue.md)。
 
-新 SKU 在领取时分配账号和最新有效 Cookie。无可用账号也可入队，容量及同步等待超时不变；优先执行最早可执行任务，优先选择运行数较少的账号，同负载轮转。指定账号忙、暂停或无 Cookie 时等待，不阻塞其他可执行任务；不存在或已删除时返回明确的账号不可用错误。
+新 SKU 在领取时分配账号和最新有效 Cookie。无可用账号也可入队，容量及同步等待超时不变；轮到 SKU 时按 Key 策略领取可执行任务；账号优先选择运行数较少者，同负载轮转。指定账号忙、暂停或无 Cookie 时等待，不阻塞其他可执行任务；不存在或已删除时返回明确的账号不可用错误。
 
 任务响应中的 [`account_id`](../src/api/queue_api.py:29) 仅表示实际绑定的执行账号，未分配时为空字符串；[`requested_account_id`](../src/api/queue_api.py:30) 单独表示请求约束，无指定时为空。历史尝试保留真实执行账号，列表仍按创建时间倒序。幂等参数包含请求指定账号，不包含动态 Cookie。
 
